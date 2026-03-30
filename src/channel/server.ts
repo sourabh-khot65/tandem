@@ -34,6 +34,7 @@ export async function startChannelServer(): Promise<void> {
   let tunnel: any = null;
   let intentionalLeave = false;
   let reconnectAttempts = 0;
+  let connectionGeneration = 0; // monotonic counter to prevent stale connections from clobbering new ones
   const MAX_RECONNECT_ATTEMPTS = 10;
   const BASE_RECONNECT_DELAY = 2000; // 2s
 
@@ -245,6 +246,14 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
     }
   }
 
+  function cancelReconnect(): void {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectAttempts = 0;
+  }
+
   function scheduleReconnect(url: string, token: string, uname: string): void {
     if (intentionalLeave || reconnectTimer) return;
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -252,21 +261,26 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       return;
     }
     const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), 30000);
+    const gen = connectionGeneration; // capture current generation
     reconnectAttempts++;
     process.stderr.write(`[intandem] Disconnected. Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...\n`);
     reconnectTimer = setTimeout(async () => {
       reconnectTimer = null;
+      if (gen !== connectionGeneration) return; // a newer connect superseded us
       const ok = await connectToHub(url, token, uname);
-      if (!ok) {
+      if (!ok && gen === connectionGeneration) {
         scheduleReconnect(url, token, uname);
       }
     }, delay);
   }
 
   function connectToHub(url: string, token: string, uname: string): Promise<boolean> {
+    const gen = ++connectionGeneration; // bump generation — any older connection is now stale
+
     return new Promise((resolve) => {
+      let ws: WebSocket;
       try {
-        hubWs = new WebSocket(url);
+        ws = new WebSocket(url);
       } catch (err: any) {
         process.stderr.write(`[intandem] Failed to create WebSocket: ${err.message}\n`);
         resolve(false);
@@ -274,11 +288,20 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       }
       let resolved = false;
 
-      hubWs.on('open', () => {
-        hubWs!.send(JSON.stringify({ kind: 'auth', token, username: uname }));
+      // Only adopt this WebSocket if we're still the current generation
+      const adopt = () => {
+        if (gen !== connectionGeneration) return false; // superseded
+        hubWs = ws;
+        return true;
+      };
+
+      ws.on('open', () => {
+        if (gen !== connectionGeneration) { ws.close(); return; }
+        ws.send(JSON.stringify({ kind: 'auth', token, username: uname }));
       });
 
-      hubWs.on('message', (data) => {
+      ws.on('message', (data) => {
+        if (gen !== connectionGeneration) { ws.close(); return; }
         let msg: HubMessage;
         try {
           msg = JSON.parse(data.toString());
@@ -288,23 +311,31 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         handleHubMessage(msg, () => {
           if (!resolved) {
             resolved = true;
-            reconnectAttempts = 0; // Reset on successful connection
-            resolve(true);
+            reconnectAttempts = 0;
+            if (adopt()) {
+              resolve(true);
+            } else {
+              ws.close();
+              resolve(false);
+            }
           }
         });
       });
 
-      hubWs.on('close', () => {
-        connected = false;
+      ws.on('close', () => {
+        // Only touch shared state if we're still the current connection
+        if (gen === connectionGeneration) {
+          connected = false;
+        }
         if (!resolved) {
           resolved = true;
           resolve(false);
-        } else if (!intentionalLeave) {
+        } else if (gen === connectionGeneration && !intentionalLeave) {
           scheduleReconnect(url, token, uname);
         }
       });
 
-      hubWs.on('error', (err) => {
+      ws.on('error', (err) => {
         process.stderr.write(`[intandem] Connection error: ${err.message}\n`);
         if (!resolved) {
           resolved = true;
@@ -316,6 +347,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
+          if (gen === connectionGeneration) ws.close();
           resolve(false);
         }
       }, 10000);
@@ -407,6 +439,16 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         break;
       }
 
+      case 'board_reject':
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Task claim rejected: ${msg.reason}. Check the board (intandem_board) and pick a different task.`,
+            meta: { type: 'task', event: 'board_reject', taskId: msg.taskId },
+          },
+        });
+        break;
+
       case 'error':
         process.stderr.write(`[intandem] Hub error: ${msg.message}\n`);
         break;
@@ -422,8 +464,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         if (connected) {
           return text('Already connected to a workspace. Use intandem_leave first.');
         }
+        cancelReconnect();
         intentionalLeave = false;
-        reconnectAttempts = 0;
 
         const name = args.name ?? 'intandem-session';
         const maxPeers = Math.min(args.max_peers ?? 5, 5);
@@ -495,8 +537,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         if (connected) {
           return text('Already connected to a workspace. Use intandem_leave first.');
         }
+        cancelReconnect();
         intentionalLeave = false;
-        reconnectAttempts = 0;
 
         const code = args.code;
         if (!code) {
@@ -682,8 +724,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         if (connected) {
           return text(`Already connected to workspace "${workspaceName}".`);
         }
+        cancelReconnect();
         intentionalLeave = false;
-        reconnectAttempts = 0;
 
         let config = loadWorkspaceConfig();
         if (!config) {
@@ -749,9 +791,11 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
     }
     const tokenToUse = startupConfig.token || creatorConfig?.token || '';
     const usernameToUse = startupConfig.username || myUsername;
+    const startupGen = connectionGeneration; // snapshot so we bail if user calls create/join
 
     (async () => {
       for (const url of urlsToTry) {
+        if (startupGen !== connectionGeneration) return; // user initiated a new connection
         process.stderr.write(`[intandem] Trying ${url}...\n`);
         const ok = await connectToHub(url, tokenToUse, usernameToUse);
         if (ok) {
@@ -761,6 +805,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
           return;
         }
       }
+      if (startupGen !== connectionGeneration) return; // user initiated a new connection
       const fallbackUrl = urlsToTry[0] || startupConfig.hubUrl;
       process.stderr.write(`[intandem] Initial reconnect failed, will retry...\n`);
       scheduleReconnect(fallbackUrl, tokenToUse, usernameToUse);

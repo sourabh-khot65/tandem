@@ -131,7 +131,7 @@ export class TandemHub {
           this.sendBoard(ws, workspace);
           break;
         case 'board_update':
-          this.handleBoardUpdate(workspace, peerUsername, msg.task);
+          this.handleBoardUpdate(ws, workspace, peerUsername, msg.task);
           break;
         case 'peers':
           this.sendPeers(ws, workspace);
@@ -294,9 +294,25 @@ export class TandemHub {
     }
   }
 
-  private handleBoardUpdate(workspace: Workspace, _from: string, task: TaskItem): void {
+  private handleBoardUpdate(ws: WebSocket, workspace: Workspace, from: string, task: TaskItem): void {
     const existing = workspace.db.getTask(task.id);
     if (existing) {
+      // Reject claim if task is already taken by someone else
+      if (
+        task.status === 'claimed' &&
+        task.assignee &&
+        existing.assignee &&
+        existing.assignee !== from &&
+        (existing.status === 'claimed' || existing.status === 'in_progress')
+      ) {
+        this.send(ws, {
+          kind: 'board_reject',
+          taskId: task.id,
+          reason: `Task "${existing.title}" is already ${existing.status} by ${existing.assignee}`,
+        });
+        return;
+      }
+
       // Only update fields that have meaningful values (non-empty strings)
       const updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description'>> = {
         status: task.status,

@@ -19,6 +19,7 @@ export type HubMessage =
   | { kind: 'message'; payload: PeerMessage }
   | { kind: 'board'; tasks: TaskItem[] }
   | { kind: 'board_update'; task: TaskItem }
+  | { kind: 'board_reject'; taskId: string; reason: string }
   | { kind: 'peers'; list: PeerInfo[] }
   | { kind: 'error'; message: string };
 
