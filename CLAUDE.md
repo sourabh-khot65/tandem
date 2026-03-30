@@ -11,9 +11,18 @@ InTandem is a real-time pair programming tool that connects up to 5 Claude Code 
 ```bash
 npm run build          # Compile TypeScript (tsc)
 npm run dev            # Watch mode (tsc --watch)
+npm run typecheck      # Type-check without emitting (tsc --noEmit)
+npm run format         # Format all files with Prettier
+npm run format:check   # Check formatting without writing
+npm run lint           # Run typecheck + format:check
 ```
 
-No test framework is configured. No linter is configured.
+Code quality is enforced via git hooks (husky):
+
+- **pre-commit**: lint-staged runs Prettier and TypeScript check on staged files
+- **commit-msg**: commitlint enforces conventional commit messages (e.g., `fix:`, `feat:`, `chore:`)
+
+No test framework is configured.
 
 ## Architecture
 

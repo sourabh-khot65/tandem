@@ -11,7 +11,12 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "npm run typecheck && npm run format:check",
+    "prepublishOnly": "npm run build",
+    "prepare": "husky"
   },
   "keywords": [
     "claude-code",
@@ -30,10 +35,24 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.5.0",
+    "@commitlint/config-conventional": "^20.5.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.1",
     "typescript": "^5.7.0"
+  },
+  "lint-staged": {
+    "*.{ts,js}": [
+      "prettier --write",
+      "bash -c 'npx tsc --noEmit'"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
   },
   "engines": {
     "node": ">=18.0.0"

@@ -61,7 +61,7 @@ export class TandemHub {
 
       this.wss.on('listening', () => {
         const addr = this.wss!.address();
-        const actualPort = (typeof addr === 'object' && addr !== null) ? addr.port : options.port;
+        const actualPort = typeof addr === 'object' && addr !== null ? addr.port : options.port;
         const hubUrl = `ws://${options.host ?? '127.0.0.1'}:${actualPort}`;
 
         // Generate join codes now that we know the URL
@@ -231,11 +231,15 @@ export class TandemHub {
     });
 
     // Notify others
-    this.broadcastToWorkspace(targetWorkspace, {
-      kind: 'peer_joined',
+    this.broadcastToWorkspace(
+      targetWorkspace,
+      {
+        kind: 'peer_joined',
+        username,
+        peers: Array.from(targetWorkspace.peers.keys()),
+      },
       username,
-      peers: Array.from(targetWorkspace.peers.keys()),
-    }, username);
+    );
 
     // Auto-push board and recent messages so the peer can self-orient
     const tasks = targetWorkspace.db.getAllTasks();

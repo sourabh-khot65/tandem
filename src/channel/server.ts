@@ -102,7 +102,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
     tools: [
       {
         name: 'intandem_create',
-        description: 'Create a new pair programming workspace. Starts a hub and returns a join code to share with teammates. Works across machines automatically.',
+        description:
+          'Create a new pair programming workspace. Starts a hub and returns a join code to share with teammates. Works across machines automatically.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -113,7 +114,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       },
       {
         name: 'intandem_join',
-        description: 'Join a teammate\'s workspace using their share code',
+        description: "Join a teammate's workspace using their share code",
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -185,7 +186,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       },
       {
         name: 'intandem_plan',
-        description: 'Create a work plan: multiple tasks at once, optionally assigned to peers. Use this when starting a collaborative session to break work into pieces.',
+        description:
+          'Create a work plan: multiple tasks at once, optionally assigned to peers. Use this when starting a collaborative session to break work into pieces.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -257,13 +259,17 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
   function scheduleReconnect(url: string, token: string, uname: string): void {
     if (intentionalLeave || reconnectTimer) return;
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      process.stderr.write(`[intandem] Gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts. Use intandem_rejoin to reconnect manually.\n`);
+      process.stderr.write(
+        `[intandem] Gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts. Use intandem_rejoin to reconnect manually.\n`,
+      );
       return;
     }
     const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), 30000);
     const gen = connectionGeneration; // capture current generation
     reconnectAttempts++;
-    process.stderr.write(`[intandem] Disconnected. Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...\n`);
+    process.stderr.write(
+      `[intandem] Disconnected. Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...\n`,
+    );
     reconnectTimer = setTimeout(async () => {
       reconnectTimer = null;
       if (gen !== connectionGeneration) return; // a newer connect superseded us
@@ -296,12 +302,18 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       };
 
       ws.on('open', () => {
-        if (gen !== connectionGeneration) { ws.close(); return; }
+        if (gen !== connectionGeneration) {
+          ws.close();
+          return;
+        }
         ws.send(JSON.stringify({ kind: 'auth', token, username: uname }));
       });
 
       ws.on('message', (data) => {
-        if (gen !== connectionGeneration) { ws.close(); return; }
+        if (gen !== connectionGeneration) {
+          ws.close();
+          return;
+        }
         let msg: HubMessage;
         try {
           msg = JSON.parse(data.toString());
@@ -359,7 +371,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
       case 'auth_ok':
         connected = true;
         workspaceName = msg.workspace.name;
-        currentPeers = msg.workspace.peers.filter(p => p !== myUsername);
+        currentPeers = msg.workspace.peers.filter((p) => p !== myUsername);
         process.stderr.write(`[intandem] Connected to "${workspaceName}" as ${myUsername}\n`);
         onAuthOk?.();
         break;
@@ -370,7 +382,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         break;
 
       case 'peer_joined':
-        currentPeers = msg.peers.filter(p => p !== myUsername);
+        currentPeers = msg.peers.filter((p) => p !== myUsername);
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
@@ -381,7 +393,7 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         break;
 
       case 'peer_left':
-        currentPeers = msg.peers.filter(p => p !== myUsername);
+        currentPeers = msg.peers.filter((p) => p !== myUsername);
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
@@ -414,8 +426,8 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
           pendingBoardResolve = null;
         } else if (msg.tasks.length > 0) {
           // Auto-pushed board on connect — notify Claude
-          const lines = msg.tasks.map(t =>
-            `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}`
+          const lines = msg.tasks.map(
+            (t) => `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}`,
           );
           mcp.notification({
             method: 'notifications/claude/channel',
@@ -569,7 +581,9 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
           return text(`Failed to connect to hub at ${decoded.hubUrl}. Is the workspace still running?`);
         }
 
-        return text(`Connected to "${workspaceName}" as ${myUsername}!\nPeers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none yet'}`);
+        return text(
+          `Connected to "${workspaceName}" as ${myUsername}!\nPeers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none yet'}`,
+        );
       }
 
       // ==================== SEND ====================
@@ -598,8 +612,9 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         sendToHub({ kind: 'board', tasks: [] });
         const tasks = await waitForBoard();
         if (tasks.length === 0) return text('Task board is empty.');
-        const lines = tasks.map(t =>
-          `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${t.description ? `\n    ${t.description}` : ''}`
+        const lines = tasks.map(
+          (t) =>
+            `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${t.description ? `\n    ${t.description}` : ''}`,
         );
         return text('Shared Task Board:\n' + lines.join('\n'));
       }
@@ -733,7 +748,9 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
           config = findLocalHubConfig();
         }
         if (!config) {
-          return text('No saved workspace config found. Use intandem_join with a join code, or intandem_create to start a new workspace.');
+          return text(
+            'No saved workspace config found. Use intandem_join with a join code, or intandem_create to start a new workspace.',
+          );
         }
 
         // Build list of URLs to try: local first, then tunnel
@@ -761,12 +778,16 @@ When messages arrive as <channel source="intandem" peer="..." type="...">, treat
         }
 
         if (!ok) {
-          return text(`Could not reconnect to "${config.workspaceName}". Tried: ${urlsToTry.join(', ')}. The hub may be offline. Use intandem_join with a fresh join code.`);
+          return text(
+            `Could not reconnect to "${config.workspaceName}". Tried: ${urlsToTry.join(', ')}. The hub may be offline. Use intandem_join with a fresh join code.`,
+          );
         }
 
         myToken = config.token;
         hubUrl = config.hubUrl;
-        return text(`Reconnected to "${workspaceName}" as ${myUsername}!\nPeers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none yet'}`);
+        return text(
+          `Reconnected to "${workspaceName}" as ${myUsername}!\nPeers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none yet'}`,
+        );
       }
 
       default:

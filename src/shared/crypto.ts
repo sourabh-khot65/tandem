@@ -5,7 +5,9 @@ export function generateWorkspaceId(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'; // no ambiguous chars
   const part = (len: number) => {
     const bytes = randomBytes(len);
-    return Array.from(bytes).map(b => chars[b % chars.length]).join('');
+    return Array.from(bytes)
+      .map((b) => chars[b % chars.length])
+      .join('');
   };
   return `TNM-${part(4)}-${part(4)}`;
 }
@@ -56,7 +58,5 @@ export function verifySignature(payload: string, signature: string, token: strin
 // Sanitize content to prevent prompt injection via channel tags
 export function sanitizeContent(content: string): string {
   // Escape any XML-like tags that could interfere with channel formatting
-  return content
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

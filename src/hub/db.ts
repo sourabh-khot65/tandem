@@ -46,13 +46,29 @@ export class TandemDB {
 
   // Task operations
   createTask(task: TaskItem): void {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(task.id, task.title, task.description ?? null, task.status, task.assignee ?? null, task.createdBy, task.createdAt, task.updatedAt);
+    `,
+      )
+      .run(
+        task.id,
+        task.title,
+        task.description ?? null,
+        task.status,
+        task.assignee ?? null,
+        task.createdBy,
+        task.createdAt,
+        task.updatedAt,
+      );
   }
 
-  updateTask(id: string, updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description'>>): TaskItem | null {
+  updateTask(
+    id: string,
+    updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description'>>,
+  ): TaskItem | null {
     const task = this.getTask(id);
     if (!task) return null;
 
@@ -67,7 +83,9 @@ export class TandemDB {
       this.db.prepare('UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?').run(updates.title, now, id);
     }
     if (updates.description !== undefined) {
-      this.db.prepare('UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?').run(updates.description ?? null, now, id);
+      this.db
+        .prepare('UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?')
+        .run(updates.description ?? null, now, id);
     }
     return this.getTask(id);
   }
@@ -89,7 +107,7 @@ export class TandemDB {
 
   getAllTasks(): TaskItem[] {
     const rows = this.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC').all() as any[];
-    return rows.map(row => ({
+    return rows.map((row) => ({
       id: row.id,
       title: row.title,
       description: row.description,
@@ -103,22 +121,32 @@ export class TandemDB {
 
   // Message log (recent messages for context when a new peer joins)
   logMessage(msg: { type: string; from: string; to?: string; content: string; timestamp: number }): void {
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       INSERT INTO messages (type, from_user, to_user, content, timestamp)
       VALUES (?, ?, ?, ?, ?)
-    `).run(msg.type, msg.from, msg.to ?? null, msg.content, msg.timestamp);
+    `,
+      )
+      .run(msg.type, msg.from, msg.to ?? null, msg.content, msg.timestamp);
 
     // Keep only last 100 messages
-    this.db.prepare(`
+    this.db
+      .prepare(
+        `
       DELETE FROM messages WHERE id NOT IN (
         SELECT id FROM messages ORDER BY id DESC LIMIT 100
       )
-    `).run();
+    `,
+      )
+      .run();
   }
 
-  getRecentMessages(limit = 20): Array<{ type: string; from: string; to?: string; content: string; timestamp: number }> {
+  getRecentMessages(
+    limit = 20,
+  ): Array<{ type: string; from: string; to?: string; content: string; timestamp: number }> {
     const rows = this.db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as any[];
-    return rows.reverse().map(row => ({
+    return rows.reverse().map((row) => ({
       type: row.type,
       from: row.from_user,
       to: row.to_user ?? undefined,

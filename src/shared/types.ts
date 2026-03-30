@@ -3,8 +3,8 @@ export type MessageType = 'finding' | 'task' | 'question' | 'status' | 'handoff'
 
 export interface PeerMessage {
   type: MessageType;
-  from: string;        // sender username
-  to?: string;         // specific peer, or undefined for broadcast
+  from: string; // sender username
+  to?: string; // specific peer, or undefined for broadcast
   content: string;
   timestamp: number;
 }
@@ -49,8 +49,8 @@ export interface TaskItem {
 
 // Workspace config stored locally after create/join
 export interface WorkspaceConfig {
-  hubUrl: string;        // primary URL (tunnel for joiners, local for creator)
-  localUrl?: string;     // local hub URL (ws://127.0.0.1:<port>)
+  hubUrl: string; // primary URL (tunnel for joiners, local for creator)
+  localUrl?: string; // local hub URL (ws://127.0.0.1:<port>)
   workspaceId: string;
   token: string;
   username: string;

@@ -7,6 +7,7 @@ InTandem connects up to 5 Claude Code sessions into a shared workspace. Share fi
 ## How It Looks
 
 **Teammate A** (inside Claude Code):
+
 ```
 You: Create an intandem workspace called fix-auth-bug
 
@@ -22,6 +23,7 @@ Claude: [calls intandem_create]
 ```
 
 **Teammate B** (inside their Claude Code):
+
 ```
 You: Join this intandem workspace: eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
 
@@ -31,6 +33,7 @@ Claude: [calls intandem_join]
 ```
 
 **Now they're connected.** Claude A finds a bug:
+
 ```
 Claude A: I found the issue — null session store in UserService line 87.
 Let me share this with the team.
@@ -40,6 +43,7 @@ Let me share this with the team.
 ```
 
 **Claude B receives it instantly:**
+
 ```
 <channel source="intandem" peer="CosmicYoda" type="finding">
 Null session store in UserService.authenticate() at line 87.
@@ -75,6 +79,7 @@ claude --dangerously-load-development-channels server:intandem
 ### 4. Create or join (inside Claude)
 
 Tell Claude:
+
 - **Create:** "Create an intandem workspace called fix-auth-bug"
 - **Join:** "Join this intandem workspace: `<paste join code>`"
 
@@ -102,17 +107,17 @@ The tunnel is free and requires no account. It's powered by [localtunnel](https:
 
 Once connected, Claude has these tools:
 
-| Tool | What it does |
-|------|-------------|
-| `intandem_create` | Create a workspace, get a join code to share |
-| `intandem_join` | Join a workspace using a teammate's code |
-| `intandem_send` | Send a message to peers (finding, task, question, status, handoff, review, chat) |
-| `intandem_peers` | See who's online |
-| `intandem_board` | View the shared task board |
-| `intandem_add_task` | Add a task to the board |
-| `intandem_claim_task` | Claim a task |
-| `intandem_update_task` | Update a task's status |
-| `intandem_leave` | Disconnect |
+| Tool                   | What it does                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| `intandem_create`      | Create a workspace, get a join code to share                                     |
+| `intandem_join`        | Join a workspace using a teammate's code                                         |
+| `intandem_send`        | Send a message to peers (finding, task, question, status, handoff, review, chat) |
+| `intandem_peers`       | See who's online                                                                 |
+| `intandem_board`       | View the shared task board                                                       |
+| `intandem_add_task`    | Add a task to the board                                                          |
+| `intandem_claim_task`  | Claim a task                                                                     |
+| `intandem_update_task` | Update a task's status                                                           |
+| `intandem_leave`       | Disconnect                                                                       |
 
 You don't call these tools directly — just talk to Claude naturally:
 
@@ -124,15 +129,15 @@ You don't call these tools directly — just talk to Claude naturally:
 
 ## Message Types
 
-| Type | When to use |
-|------|------------|
-| `finding` | Discovered something: bug location, root cause, useful context |
-| `task` | Dividing work: "I'll do X, you do Y" |
-| `question` | Asking peers: "How does X work?" |
-| `status` | Progress update: "Done with X, moving to Y" |
-| `handoff` | Transferring work with context |
-| `review` | Code review feedback |
-| `chat` | General conversation |
+| Type       | When to use                                                    |
+| ---------- | -------------------------------------------------------------- |
+| `finding`  | Discovered something: bug location, root cause, useful context |
+| `task`     | Dividing work: "I'll do X, you do Y"                           |
+| `question` | Asking peers: "How does X work?"                               |
+| `status`   | Progress update: "Done with X, moving to Y"                    |
+| `handoff`  | Transferring work with context                                 |
+| `review`   | Code review feedback                                           |
+| `chat`     | General conversation                                           |
 
 ## Usernames
 

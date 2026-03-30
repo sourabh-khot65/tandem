@@ -45,8 +45,16 @@ export function loadWorkspaceConfig(): WorkspaceConfig | null {
 }
 
 export function clearWorkspaceConfig(): void {
-  try { unlinkSync(sessionFile()); } catch { /* already gone */ }
-  try { unlinkSync(join(CONFIG_DIR, 'config.json')); } catch { /* already gone */ }
+  try {
+    unlinkSync(sessionFile());
+  } catch {
+    /* already gone */
+  }
+  try {
+    unlinkSync(join(CONFIG_DIR, 'config.json'));
+  } catch {
+    /* already gone */
+  }
 }
 
 /**
@@ -56,7 +64,7 @@ export function clearWorkspaceConfig(): void {
 export function findLocalHubConfig(): WorkspaceConfig | null {
   ensureConfigDir();
   try {
-    const files = readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
+    const files = readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
     for (const f of files) {
       try {
         const data = readFileSync(join(SESSIONS_DIR, f), 'utf-8');
@@ -64,9 +72,13 @@ export function findLocalHubConfig(): WorkspaceConfig | null {
         if (config.isCreator && config.localUrl) {
           return config;
         }
-      } catch { /* skip bad files */ }
+      } catch {
+        /* skip bad files */
+      }
     }
-  } catch { /* dir doesn't exist */ }
+  } catch {
+    /* dir doesn't exist */
+  }
   return null;
 }
 
