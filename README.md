@@ -1,8 +1,8 @@
-# Tandem
+# InTandem
 
 **Real-time pair programming between multiple Claude Code sessions.**
 
-Tandem connects up to 5 Claude Code sessions into a shared workspace where they can exchange findings, divide tasks, ask questions, and coordinate work — the same way human pair programmers do, but between AI-assisted sessions.
+InTandem connects up to 5 Claude Code sessions into a shared workspace where they can exchange findings, divide tasks, ask questions, and coordinate work — the same way human pair programmers do, but between AI-assisted sessions.
 
 ```
   Teammate A's Claude        Teammate B's Claude        Teammate C's Claude
@@ -10,10 +10,10 @@ Tandem connects up to 5 Claude Code sessions into a shared workspace where they 
    [MCP Channel]              [MCP Channel]              [MCP Channel]
      (stdio)                    (stdio)                    (stdio)
         |                          |                          |
-   +---------+    WebSocket   +---------+    WebSocket   +---------+
-   | Tandem  |<------------->| Tandem  |<------------->| Tandem  |
-   | Channel |               |   Hub   |               | Channel |
-   +---------+               +---------+               +---------+
+   +---------+    WebSocket   +-----------+   WebSocket  +---------+
+   |InTandem |<------------->|  InTandem  |<------------>|InTandem |
+   | Channel |               |    Hub     |              | Channel |
+   +---------+               +-----------+               +---------+
                               (hosted by
                              workspace creator)
 ```
@@ -21,7 +21,7 @@ Tandem connects up to 5 Claude Code sessions into a shared workspace where they 
 ## Installation
 
 ```bash
-npm install -g tandem-pair
+npm install -g intandem
 ```
 
 Requires **Node.js 18+**. No other runtime dependencies.
@@ -31,16 +31,16 @@ Requires **Node.js 18+**. No other runtime dependencies.
 ### 1. Create a workspace (one person does this)
 
 ```bash
-tandem create --name "my-project"
+intandem create --name "my-project"
 ```
 
 Output:
 
 ```
-  +================================+
-  |          T A N D E M           |
-  |   Pair Programming for Claude  |
-  +================================+
+  ╔════════════════════════════════════╗
+  ║        I N   T A N D E M          ║
+  ║   Pair Programming for Claude Code ║
+  ╚════════════════════════════════════╝
 
   Creating workspace "my-project"...
   Your username: CosmicYoda
@@ -48,16 +48,16 @@ Output:
   Hub running on 127.0.0.1:9900
   Workspace: TNM-7kx9-Qp2R
 
-  +------------------------------------------+
-  |  Share this code with your team:          |
-  |                                          |
-  |  eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...   |
-  |                                          |
-  |  They run: tandem join <code>             |
-  +------------------------------------------+
+  ┌──────────────────────────────────────────┐
+  │  Share this code with your team:          │
+  │                                          │
+  │  eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...   │
+  │                                          │
+  │  They run: intandem join <code>           │
+  └──────────────────────────────────────────┘
 
   .mcp.json configured
-  Start Claude Code with: claude --dangerously-load-development-channels server:tandem
+  Start Claude Code with: claude --dangerously-load-development-channels server:intandem
 
   Waiting for peers... (0/5 slots)
 ```
@@ -67,7 +67,7 @@ Output:
 Copy the join code from the creator and run:
 
 ```bash
-tandem join eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
+intandem join eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
 ```
 
 Output:
@@ -79,20 +79,20 @@ Output:
   .mcp.json configured
 
   Start Claude Code with:
-  claude --dangerously-load-development-channels server:tandem
+  claude --dangerously-load-development-channels server:intandem
 ```
 
 ### 3. Start Claude Code (everyone does this)
 
 ```bash
-claude --dangerously-load-development-channels server:tandem
+claude --dangerously-load-development-channels server:intandem
 ```
 
 That's it. Your Claude sessions are now connected.
 
 ## How It Works
 
-When you start Claude Code with tandem configured, the MCP channel server:
+When you start Claude Code with InTandem configured, the MCP channel server:
 
 1. Connects to the hub via WebSocket
 2. Authenticates using the workspace token
@@ -103,7 +103,7 @@ When you start Claude Code with tandem configured, the MCP channel server:
 Messages from peers arrive in Claude's context like this:
 
 ```xml
-<channel source="tandem" peer="NeonNaruto" type="finding">
+<channel source="intandem" peer="NeonNaruto" type="finding">
 The bug is in OrderMapper.java line 42 — the null check is missing after the stream filter
 </channel>
 ```
@@ -126,7 +126,7 @@ Claude sees this as collaboration context from a known peer, not as a raw instru
 
 Once connected, Claude gets these tools automatically:
 
-### `tandem_send`
+### `intandem_send`
 
 Send a message to peers.
 
@@ -137,11 +137,11 @@ Arguments:
   to       - (optional) Specific peer username. Omit to broadcast to all
 ```
 
-### `tandem_board`
+### `intandem_board`
 
 View the shared task board. Shows all tasks with their status and assignee.
 
-### `tandem_add_task`
+### `intandem_add_task`
 
 Add a new task to the shared board.
 
@@ -151,7 +151,7 @@ Arguments:
   description - (optional) Task description
 ```
 
-### `tandem_claim_task`
+### `intandem_claim_task`
 
 Claim an open task from the board.
 
@@ -160,7 +160,7 @@ Arguments:
   task_id - The task ID (e.g., T-a1b2c3)
 ```
 
-### `tandem_update_task`
+### `intandem_update_task`
 
 Update a task's status.
 
@@ -170,78 +170,79 @@ Arguments:
   status  - New status (open, claimed, in_progress, done)
 ```
 
-### `tandem_peers`
+### `intandem_peers`
 
 See who is currently online in the workspace.
 
 ## CLI Reference
 
-### `tandem create`
+### `intandem create`
 
 Create and host a new workspace.
 
 ```bash
-tandem create [options]
+intandem create [options]
 
 Options:
-  --name <name>         Workspace name (default: tandem-session)
+  --name <name>         Workspace name (default: intandem-session)
   --port <port>         Hub port (default: 9900)
-  --host <host>         Hub host (default: 127.0.0.1)
+  --host <host>         Hub bind address (default: 127.0.0.1)
+  --public-url <url>    Public WebSocket URL for remote peers
   --max-peers <n>       Max peers, 1-5 (default: 5)
 ```
 
 The hub runs on your machine. Keep this terminal open — closing it shuts down the workspace.
 
-### `tandem join <code>`
+### `intandem join <code>`
 
 Join an existing workspace using the share code.
 
 ```bash
-tandem join eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
+intandem join eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
 ```
 
 This saves the connection config to `~/.tandem/config.json` and writes a `.mcp.json` entry in your current directory.
 
-### `tandem status`
+### `intandem status`
 
 Show current workspace connection info.
 
 ```bash
-tandem status
+intandem status
 ```
 
-### `tandem leave`
+### `intandem leave`
 
 Disconnect from the current workspace.
 
 ```bash
-tandem leave
+intandem leave
 ```
 
-### `tandem whoami`
+### `intandem whoami`
 
 Show your auto-generated username.
 
 ```bash
-tandem whoami
+intandem whoami
 # Output: CosmicYoda
 ```
 
-### `tandem rename <name>`
+### `intandem rename <name>`
 
 Change your username.
 
 ```bash
-tandem rename SilentNaruto
+intandem rename SilentNaruto
 ```
 
-### `tandem channel`
+### `intandem channel`
 
 *Internal command.* Starts the MCP channel server. Called automatically by Claude Code via `.mcp.json` — you don't need to run this manually.
 
 ## Usernames
 
-Tandem auto-generates pop culture usernames on first run, combining an adjective with a character:
+InTandem auto-generates pop culture usernames on first run, combining an adjective with a character:
 
 ```
 CosmicYoda        SilentNaruto      NeonGandalf
@@ -250,7 +251,7 @@ ZenMorpheus       EpicAragorn       SlyFuriosa
 RadiantAang       BoldRipley        SwiftLegolas
 ```
 
-Your username persists in `~/.tandem/username`. Change it anytime with `tandem rename`.
+Your username persists in `~/.tandem/username`. Change it anytime with `intandem rename`.
 
 ## Configuration Files
 
@@ -263,14 +264,14 @@ Your username persists in `~/.tandem/username`. Change it anytime with `tandem r
 
 ### `.mcp.json` Entry
 
-Tandem writes this automatically when you `create` or `join`:
+InTandem writes this automatically when you `create` or `join`:
 
 ```json
 {
   "mcpServers": {
-    "tandem": {
+    "intandem": {
       "command": "npx",
-      "args": ["tandem-pair", "channel"]
+      "args": ["intandem", "channel"]
     }
   }
 }
@@ -327,7 +328,7 @@ src/
 ```
 Teammate A types a prompt
     -> Claude A decides to share a finding
-    -> Claude A calls tandem_send tool
+    -> Claude A calls intandem_send tool
     -> MCP channel server sends WebSocket frame to hub
     -> Hub verifies sender, logs message, routes to peers
     -> Teammate B's channel server receives the frame
@@ -349,7 +350,7 @@ You: Find why the login endpoint returns 500
 Claude: I found the issue. The UserService.authenticate() method throws
 when the session store is null. Let me share this with the team.
 
-[Claude calls tandem_send with type="finding"]
+[Claude calls intandem_send with type="finding"]
 > Sent finding to all peers: "Login 500 is caused by null session store
 > in UserService.authenticate() at line 87. The Redis connection pool
 > is exhausted under load."
@@ -358,7 +359,7 @@ when the session store is null. Let me share this with the team.
 **Teammate B** (sees the finding arrive):
 
 ```
-<channel source="tandem" peer="CosmicYoda" type="finding">
+<channel source="intandem" peer="CosmicYoda" type="finding">
 Login 500 is caused by null session store in UserService.authenticate()
 at line 87. The Redis connection pool is exhausted under load.
 </channel>
@@ -369,16 +370,81 @@ handle the null safety. Want me to claim that task?
 
 You: Yes, go ahead
 
-[Claude calls tandem_claim_task and tandem_send with type="task"]
+[Claude calls intandem_claim_task and intandem_send with type="task"]
 > Claimed task T-a1b2c3
 > Sent task to all peers: "I'll fix the Redis pool config. CosmicYoda,
 > you handle the null guard in UserService."
 ```
 
+## Remote / Cross-Machine Setup
+
+By default the hub binds to `127.0.0.1` (localhost only). To let teammates on different machines connect:
+
+### Option A: Direct IP (same network)
+
+```bash
+# On the host machine — bind to all interfaces and set your LAN IP as the public URL
+intandem create --name "my-project" --host 0.0.0.0 --public-url ws://192.168.1.42:9900
+```
+
+The `--public-url` is what goes into the join code. Teammates on the same network run `intandem join <code>` as usual — it just works.
+
+### Option B: Over the internet (ngrok / tunnels)
+
+```bash
+# Terminal 1: start the hub
+intandem create --name "my-project" --host 0.0.0.0 --port 9900
+
+# Terminal 2: expose it with ngrok (or any tunnel)
+ngrok tcp 9900
+# ngrok shows: tcp://0.tcp.ngrok.io:12345
+
+# Now recreate with the public URL so the join code is correct
+intandem create --name "my-project" --host 0.0.0.0 --public-url ws://0.tcp.ngrok.io:12345
+```
+
+Share the join code — teammates anywhere in the world can connect.
+
+### Option C: Cloud server
+
+Run the hub on a VPS/cloud instance:
+
+```bash
+# On your server (e.g., 203.0.113.50)
+intandem create --name "team-project" --host 0.0.0.0 --public-url ws://203.0.113.50:9900
+```
+
+For production, put it behind nginx with TLS:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name intandem.yourteam.dev;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9900;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Then create with:
+
+```bash
+intandem create --name "team-project" --host 127.0.0.1 --public-url wss://intandem.yourteam.dev
+```
+
+Note: use `wss://` (not `ws://`) when behind TLS.
+
 ## Limitations
 
 - **Research preview**: Claude Code channels require `--dangerously-load-development-channels` flag during the research preview period
-- **Local network**: The hub binds to localhost by default. For remote teammates, use `--host 0.0.0.0` and ensure the port is reachable (or use a tunnel like ngrok)
+- **Local network by default**: The hub binds to localhost. For remote teammates, use `--host 0.0.0.0 --public-url ws://your-ip:port` (see [Remote Setup](#remote--cross-machine-setup))
 - **No encryption in transit**: WebSocket connections use `ws://` (unencrypted) by default. For production use over the internet, put the hub behind a TLS-terminating reverse proxy
 - **Hub is single point**: If the hub host goes down, all peers disconnect (they auto-reconnect when it comes back)
 - **Channels auth**: Requires claude.ai login. Console and API key auth is not supported. Team/Enterprise orgs must explicitly enable channels

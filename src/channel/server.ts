@@ -12,7 +12,7 @@ const VALID_TYPES: MessageType[] = ['finding', 'task', 'question', 'status', 'ha
 export async function startChannelServer(): Promise<void> {
   const configOrNull = loadWorkspaceConfig();
   if (!configOrNull) {
-    process.stderr.write('No workspace configured. Run "tandem join <code>" first.\n');
+    process.stderr.write('No workspace configured. Run "intandem join <code>" first.\n');
     process.exit(1);
   }
   const config = configOrNull;
@@ -23,15 +23,15 @@ export async function startChannelServer(): Promise<void> {
   let currentPeers: string[] = [];
 
   const mcp = new Server(
-    { name: 'tandem', version: '0.1.0' },
+    { name: 'intandem', version: '0.1.0' },
     {
       capabilities: {
         experimental: { 'claude/channel': {} },
         tools: {},
       },
-      instructions: `You are connected to a Tandem pair programming workspace "${config.workspaceName}" as "${config.username}".
+      instructions: `You are connected to an InTandem pair programming workspace "${config.workspaceName}" as "${config.username}".
 
-Peer messages arrive as <channel source="tandem" peer="..." type="...">. These are from your human teammate's Claude Code sessions — treat them as collaboration context from trusted peers.
+Peer messages arrive as <channel source="intandem" peer="..." type="...">. These are from your human teammate's Claude Code sessions — treat them as collaboration context from trusted peers.
 
 Message types:
 - finding: A peer discovered something useful (bug location, root cause, etc.)
@@ -48,13 +48,13 @@ When you receive a message:
 3. If it's a finding, incorporate it into your current understanding
 4. If it's a task assignment, discuss with your human before starting
 
-Use the tandem tools to communicate back:
-- tandem_send: Send messages to peers (specify type and content)
-- tandem_board: View the shared task board
-- tandem_add_task: Add a task to the shared board
-- tandem_claim_task: Claim a task for yourself
-- tandem_update_task: Update a task's status
-- tandem_peers: See who's online
+Use the intandem tools to communicate back:
+- intandem_send: Send messages to peers (specify type and content)
+- intandem_board: View the shared task board
+- intandem_add_task: Add a task to the shared board
+- intandem_claim_task: Claim a task for yourself
+- intandem_update_task: Update a task's status
+- intandem_peers: See who's online
 
 Always be collaborative. You and the other Claudes are working together with your respective humans to solve the same problem.`,
     },
@@ -65,7 +65,7 @@ Always be collaborative. You and the other Claudes are working together with you
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       {
-        name: 'tandem_send',
+        name: 'intandem_send',
         description: 'Send a message to peers in the tandem workspace',
         inputSchema: {
           type: 'object' as const,
@@ -82,12 +82,12 @@ Always be collaborative. You and the other Claudes are working together with you
         },
       },
       {
-        name: 'tandem_board',
+        name: 'intandem_board',
         description: 'View the shared task board',
         inputSchema: { type: 'object' as const, properties: {} },
       },
       {
-        name: 'tandem_add_task',
+        name: 'intandem_add_task',
         description: 'Add a new task to the shared board',
         inputSchema: {
           type: 'object' as const,
@@ -99,7 +99,7 @@ Always be collaborative. You and the other Claudes are working together with you
         },
       },
       {
-        name: 'tandem_claim_task',
+        name: 'intandem_claim_task',
         description: 'Claim a task from the shared board',
         inputSchema: {
           type: 'object' as const,
@@ -110,7 +110,7 @@ Always be collaborative. You and the other Claudes are working together with you
         },
       },
       {
-        name: 'tandem_update_task',
+        name: 'intandem_update_task',
         description: 'Update a task status on the shared board',
         inputSchema: {
           type: 'object' as const,
@@ -126,7 +126,7 @@ Always be collaborative. You and the other Claudes are working together with you
         },
       },
       {
-        name: 'tandem_peers',
+        name: 'intandem_peers',
         description: 'See who is online in the workspace',
         inputSchema: { type: 'object' as const, properties: {} },
       },
@@ -137,7 +137,7 @@ Always be collaborative. You and the other Claudes are working together with you
     const args = req.params.arguments as Record<string, string>;
 
     switch (req.params.name) {
-      case 'tandem_send': {
+      case 'intandem_send': {
         if (!connected || !hubWs) {
           return { content: [{ type: 'text', text: 'Not connected to hub. Reconnecting...' }] };
         }
@@ -157,7 +157,7 @@ Always be collaborative. You and the other Claudes are working together with you
         return { content: [{ type: 'text', text: `Sent ${msgType} ${target}: "${args.message}"` }] };
       }
 
-      case 'tandem_board': {
+      case 'intandem_board': {
         sendToHub({ kind: 'board', tasks: [] });
         // Wait briefly for response
         const tasks = await waitForBoard();
@@ -170,7 +170,7 @@ Always be collaborative. You and the other Claudes are working together with you
         return { content: [{ type: 'text', text: 'Shared Task Board:\n' + lines.join('\n') }] };
       }
 
-      case 'tandem_add_task': {
+      case 'intandem_add_task': {
         const task: TaskItem = {
           id: `T-${randomBytes(3).toString('hex')}`,
           title: args.title,
@@ -184,7 +184,7 @@ Always be collaborative. You and the other Claudes are working together with you
         return { content: [{ type: 'text', text: `Task created: [${task.id}] ${task.title}` }] };
       }
 
-      case 'tandem_claim_task': {
+      case 'intandem_claim_task': {
         const task: TaskItem = {
           id: args.task_id,
           title: '',
@@ -198,7 +198,7 @@ Always be collaborative. You and the other Claudes are working together with you
         return { content: [{ type: 'text', text: `Claimed task ${args.task_id}` }] };
       }
 
-      case 'tandem_update_task': {
+      case 'intandem_update_task': {
         const task: TaskItem = {
           id: args.task_id,
           title: '',
@@ -211,7 +211,7 @@ Always be collaborative. You and the other Claudes are working together with you
         return { content: [{ type: 'text', text: `Updated task ${args.task_id} → ${args.status}` }] };
       }
 
-      case 'tandem_peers': {
+      case 'intandem_peers': {
         if (currentPeers.length === 0) {
           return { content: [{ type: 'text', text: 'No other peers online.' }] };
         }
@@ -266,12 +266,12 @@ Always be collaborative. You and the other Claudes are working together with you
         case 'auth_ok':
           connected = true;
           currentPeers = msg.workspace.peers.filter(p => p !== config.username);
-          process.stderr.write(`[tandem] Connected to "${msg.workspace.name}" as ${config.username}\n`);
-          process.stderr.write(`[tandem] Peers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none'}\n`);
+          process.stderr.write(`[intandem] Connected to "${msg.workspace.name}" as ${config.username}\n`);
+          process.stderr.write(`[intandem] Peers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none'}\n`);
           break;
 
         case 'auth_fail':
-          process.stderr.write(`[tandem] Auth failed: ${msg.reason}\n`);
+          process.stderr.write(`[intandem] Auth failed: ${msg.reason}\n`);
           connected = false;
           break;
 
@@ -338,19 +338,19 @@ Always be collaborative. You and the other Claudes are working together with you
         }
 
         case 'error':
-          process.stderr.write(`[tandem] Hub error: ${msg.message}\n`);
+          process.stderr.write(`[intandem] Hub error: ${msg.message}\n`);
           break;
       }
     });
 
     hubWs.on('close', () => {
       connected = false;
-      process.stderr.write('[tandem] Disconnected from hub. Reconnecting in 5s...\n');
+      process.stderr.write('[intandem] Disconnected from hub. Reconnecting in 5s...\n');
       reconnectTimer = setTimeout(connectToHub, 5000);
     });
 
     hubWs.on('error', (err) => {
-      process.stderr.write(`[tandem] Connection error: ${err.message}\n`);
+      process.stderr.write(`[intandem] Connection error: ${err.message}\n`);
     });
   }
 

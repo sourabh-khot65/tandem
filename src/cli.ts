@@ -36,19 +36,20 @@ function parseFlag(flag: string): string | undefined {
 
 function printBanner(): void {
   console.log(`
-  ╔════════════════════════════════╗
-  ║          T A N D E M           ║
-  ║   Pair Programming for Claude  ║
-  ╚════════════════════════════════╝
+  ╔════════════════════════════════════╗
+  ║        I N   T A N D E M          ║
+  ║   Pair Programming for Claude Code ║
+  ╚════════════════════════════════════╝
 `);
 }
 
 async function cmdCreate(): Promise<void> {
   printBanner();
-  const name = parseFlag('--name') ?? 'tandem-session';
+  const name = parseFlag('--name') ?? 'intandem-session';
   const port = parseInt(parseFlag('--port') ?? '9900', 10);
   const maxPeers = parseInt(parseFlag('--max-peers') ?? '5', 10);
   const host = parseFlag('--host') ?? '127.0.0.1';
+  const publicUrl = parseFlag('--public-url');
   const username = getOrCreateUsername();
 
   console.log(`  Creating workspace "${name}"...`);
@@ -59,7 +60,9 @@ async function cmdCreate(): Promise<void> {
   const { workspaceId, token } = hub.createWorkspace(name, maxPeers);
   const { port: actualPort, joinCodes } = await hub.start({ port, host });
 
-  const hubUrl = `ws://${host}:${actualPort}`;
+  // If --public-url is provided, use it for the join code so remote machines can connect
+  // Otherwise fall back to the bind address (works for local-only)
+  const hubUrl = publicUrl ?? `ws://${host}:${actualPort}`;
   const joinCode = createJoinCode(hubUrl, workspaceId, token);
 
   // Save config so the channel server can connect
@@ -75,6 +78,9 @@ async function cmdCreate(): Promise<void> {
   writeMcpConfig();
 
   console.log(`  ✓ Hub running on ${host}:${actualPort}`);
+  if (publicUrl) {
+    console.log(`  ✓ Public URL: ${publicUrl}`);
+  }
   console.log(`  ✓ Workspace: ${workspaceId}`);
   console.log();
   console.log(`  ┌──────────────────────────────────────────┐`);
@@ -82,11 +88,11 @@ async function cmdCreate(): Promise<void> {
   console.log(`  │                                          │`);
   console.log(`  │  ${joinCode}`);
   console.log(`  │                                          │`);
-  console.log(`  │  They run: tandem join <code>             │`);
+  console.log(`  │  They run: intandem join <code>           │`);
   console.log(`  └──────────────────────────────────────────┘`);
   console.log();
   console.log(`  ✓ .mcp.json configured`);
-  console.log(`  ✓ Start Claude Code with: claude --dangerously-load-development-channels server:tandem`);
+  console.log(`  ✓ Start Claude Code with: claude --dangerously-load-development-channels server:intandem`);
   console.log();
   console.log(`  Waiting for peers... (0/${maxPeers} slots)`);
   console.log(`  Press Ctrl+C to stop the hub.`);
@@ -102,7 +108,7 @@ async function cmdJoin(): Promise<void> {
   printBanner();
   const code = args[1];
   if (!code) {
-    console.error('  Usage: tandem join <code>');
+    console.error('  Usage: intandem join <code>');
     console.error('  Get the join code from whoever created the workspace.');
     process.exit(1);
   }
@@ -120,7 +126,7 @@ async function cmdJoin(): Promise<void> {
     workspaceId: decoded.workspaceId,
     token: decoded.token,
     username,
-    workspaceName: 'tandem-session',
+    workspaceName: 'intandem-session',
   });
 
   writeMcpConfig();
@@ -131,7 +137,7 @@ async function cmdJoin(): Promise<void> {
   console.log(`  ✓ .mcp.json configured`);
   console.log();
   console.log(`  Start Claude Code with:`);
-  console.log(`  claude --dangerously-load-development-channels server:tandem`);
+  console.log(`  claude --dangerously-load-development-channels server:intandem`);
 }
 
 function cmdStatus(): void {
@@ -139,7 +145,7 @@ function cmdStatus(): void {
   const config = loadWorkspaceConfig();
   if (!config) {
     console.log('  Not connected to any workspace.');
-    console.log('  Run "tandem create" or "tandem join <code>" to get started.');
+    console.log('  Run "intandem create" or "intandem join <code>" to get started.');
     return;
   }
 
@@ -165,7 +171,7 @@ function cmdWhoami(): void {
 function cmdRename(): void {
   const newName = args[1];
   if (!newName) {
-    console.error('Usage: tandem rename <new-username>');
+    console.error('Usage: intandem rename <new-username>');
     process.exit(1);
   }
   saveUsername(newName);
@@ -201,10 +207,9 @@ function writeMcpConfig(): void {
     mcpConfig.mcpServers = {};
   }
 
-  // Point to the tandem channel server
-  mcpConfig.mcpServers.tandem = {
+  mcpConfig.mcpServers.intandem = {
     command: 'npx',
-    args: ['tandem-pair', 'channel'],
+    args: ['intandem', 'channel'],
   };
 
   writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n');
@@ -214,18 +219,23 @@ function printHelp(): void {
   printBanner();
   console.log(`  Commands:`);
   console.log();
-  console.log(`    tandem create [options]     Create & host a workspace`);
-  console.log(`      --name <name>             Workspace name (default: tandem-session)`);
-  console.log(`      --port <port>             Hub port (default: 9900)`);
-  console.log(`      --host <host>             Hub host (default: 127.0.0.1)`);
-  console.log(`      --max-peers <n>           Max peers (default: 5, max: 5)`);
+  console.log(`    intandem create [options]     Create & host a workspace`);
+  console.log(`      --name <name>               Workspace name (default: intandem-session)`);
+  console.log(`      --port <port>               Hub port (default: 9900)`);
+  console.log(`      --host <host>               Hub bind address (default: 127.0.0.1)`);
+  console.log(`      --public-url <url>          Public WebSocket URL for remote peers`);
+  console.log(`      --max-peers <n>             Max peers (default: 5, max: 5)`);
   console.log();
-  console.log(`    tandem join <code>          Join a workspace using a share code`);
-  console.log(`    tandem status               Show current workspace info`);
-  console.log(`    tandem leave                Disconnect from workspace`);
-  console.log(`    tandem whoami               Show your username`);
-  console.log(`    tandem rename <name>        Change your username`);
-  console.log(`    tandem channel              (internal) Start MCP channel server`);
+  console.log(`  Remote teammates (different machines):`);
+  console.log();
+  console.log(`    intandem create --host 0.0.0.0 --public-url ws://your-ip:9900`);
+  console.log();
+  console.log(`    intandem join <code>          Join a workspace using a share code`);
+  console.log(`    intandem status               Show current workspace info`);
+  console.log(`    intandem leave                Disconnect from workspace`);
+  console.log(`    intandem whoami               Show your username`);
+  console.log(`    intandem rename <name>        Change your username`);
+  console.log(`    intandem channel              (internal) Start MCP channel server`);
   console.log();
 }
 
