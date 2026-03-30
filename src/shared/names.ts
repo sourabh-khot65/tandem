@@ -1,0 +1,32 @@
+// Pop culture username generator (Reddit-style)
+
+const adjectives = [
+  'Cosmic', 'Silent', 'Neon', 'Lazy', 'Wild', 'Chaotic', 'Zen', 'Epic',
+  'Sly', 'Radiant', 'Bold', 'Swift', 'Mystic', 'Rogue', 'Fierce',
+  'Shadow', 'Crimson', 'Golden', 'Iron', 'Frost', 'Storm', 'Quantum',
+  'Hyper', 'Ultra', 'Mega', 'Dark', 'Bright', 'Mad', 'Noble', 'Dread',
+  'Sonic', 'Turbo', 'Pixel', 'Cyber', 'Astral', 'Lunar', 'Solar',
+  'Atomic', 'Velvet', 'Chrome',
+];
+
+const characters = [
+  // Anime/Manga
+  'Naruto', 'Goku', 'Levi', 'Spike', 'Aang', 'Zuko', 'Vegeta', 'Itachi',
+  'Luffy', 'Saitama', 'Tanjiro', 'Gojo', 'Eren', 'Mikasa', 'Killua',
+  // Movies/TV
+  'Gandalf', 'Yoda', 'Batman', 'Ripley', 'Neo', 'Morpheus', 'Loki',
+  'Thor', 'Furiosa', 'Aragorn', 'Legolas', 'Sherlock', 'Groot', 'Thanos',
+  'Vader', 'Solo', 'Spock', 'Picard', 'Eleven', 'Hopper',
+  // Games
+  'Mario', 'Link', 'Kratos', 'Geralt', 'Ezio', 'Chief', 'Kirby',
+  'Samus', 'Cloud', 'Tifa', 'Dante', 'Doom', 'Snake', 'Ryu', 'Jinx',
+  // Comics/Books
+  'Deadpool', 'Wolverine', 'Storm', 'Raven', 'Cyborg', 'Flash',
+  'Frodo', 'Arya', 'Tyrion', 'Ender', 'Dune', 'Atreides',
+];
+
+export function generateUsername(): string {
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const char = characters[Math.floor(Math.random() * characters.length)];
+  return `${adj}${char}`;
+}
