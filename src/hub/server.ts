@@ -11,6 +11,7 @@ interface ConnectedPeer {
   currentTask?: string;
   lastMessageAt: number;
   messageCount: number; // rolling window for rate limiting
+  alive: boolean; // ping/pong liveness tracking
 }
 
 interface Workspace {
@@ -32,6 +33,7 @@ export class TandemHub {
   private workspaces = new Map<string, Workspace>();
   private rateLimitWindow = 60_000; // 1 minute
   private maxMessagesPerWindow = 30;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
 
   createWorkspace(name: string, maxPeers = 5): { workspaceId: string; token: string; joinCode: string } {
     const workspaceId = generateWorkspaceId();
@@ -76,6 +78,9 @@ export class TandemHub {
 
       // Rate limit reset timer
       setInterval(() => this.resetRateLimits(), this.rateLimitWindow);
+
+      // Ping all peers every 30s to detect dead connections
+      this.pingInterval = setInterval(() => this.pingAllPeers(), 30_000);
     });
   }
 
@@ -137,12 +142,16 @@ export class TandemHub {
     ws.on('close', () => {
       clearTimeout(authTimeout);
       if (workspace && peerUsername) {
-        workspace.peers.delete(peerUsername);
-        this.broadcastToWorkspace(workspace, {
-          kind: 'peer_left',
-          username: peerUsername,
-          peers: Array.from(workspace.peers.keys()),
-        });
+        // Only remove if this ws is still the registered one (not replaced by a reconnect)
+        const currentPeer = workspace.peers.get(peerUsername);
+        if (currentPeer && currentPeer.ws === ws) {
+          workspace.peers.delete(peerUsername);
+          this.broadcastToWorkspace(workspace, {
+            kind: 'peer_left',
+            username: peerUsername,
+            peers: Array.from(workspace.peers.keys()),
+          });
+        }
       }
     });
 
@@ -171,6 +180,14 @@ export class TandemHub {
       return;
     }
 
+    // Prune dead peers before checking capacity
+    for (const [u, p] of targetWorkspace.peers) {
+      if (p.ws.readyState === WebSocket.CLOSED || p.ws.readyState === WebSocket.CLOSING) {
+        targetWorkspace.peers.delete(u);
+        process.stderr.write(`[hub] Pruned dead peer "${u}" during auth\n`);
+      }
+    }
+
     // Check capacity
     if (targetWorkspace.peers.size >= targetWorkspace.maxPeers) {
       this.send(ws, { kind: 'auth_fail', reason: `Workspace full (${targetWorkspace.maxPeers} peers max)` });
@@ -178,11 +195,13 @@ export class TandemHub {
       return;
     }
 
-    // Check username collision
+    // Check username collision — kick the stale connection and reuse the name
     let username = msg.username;
-    if (targetWorkspace.peers.has(username)) {
-      // Append random suffix
-      username = `${username}_${randomBytes(2).toString('hex')}`;
+    const existingPeer = targetWorkspace.peers.get(username);
+    if (existingPeer) {
+      process.stderr.write(`[hub] Replacing stale connection for "${username}"\n`);
+      existingPeer.ws.close();
+      targetWorkspace.peers.delete(username);
     }
 
     const peer: ConnectedPeer = {
@@ -191,7 +210,13 @@ export class TandemHub {
       connectedAt: Date.now(),
       lastMessageAt: 0,
       messageCount: 0,
+      alive: true,
     };
+
+    ws.on('pong', () => {
+      const p = targetWorkspace.peers.get(username);
+      if (p && p.ws === ws) p.alive = true;
+    });
 
     targetWorkspace.peers.set(username, peer);
 
@@ -253,12 +278,14 @@ export class TandemHub {
   private handleBoardUpdate(workspace: Workspace, from: string, task: TaskItem): void {
     const existing = workspace.db.getTask(task.id);
     if (existing) {
-      const updated = workspace.db.updateTask(task.id, {
+      // Only update fields that have meaningful values (non-empty strings)
+      const updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description'>> = {
         status: task.status,
-        assignee: task.assignee,
-        title: task.title,
-        description: task.description,
-      });
+      };
+      if (task.assignee !== undefined) updates.assignee = task.assignee;
+      if (task.title) updates.title = task.title;
+      if (task.description !== undefined) updates.description = task.description;
+      const updated = workspace.db.updateTask(task.id, updates);
       if (updated) {
         this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated });
       }
@@ -285,10 +312,20 @@ export class TandemHub {
   }
 
   private broadcastToWorkspace(workspace: Workspace, msg: HubMessage, excludeUsername?: string): void {
+    const dead: string[] = [];
     for (const [username, peer] of workspace.peers) {
+      if (peer.ws.readyState === WebSocket.CLOSED || peer.ws.readyState === WebSocket.CLOSING) {
+        dead.push(username);
+        continue;
+      }
       if (username !== excludeUsername && peer.ws.readyState === WebSocket.OPEN) {
         this.send(peer.ws, msg);
       }
+    }
+    // Prune dead peers
+    for (const u of dead) {
+      workspace.peers.delete(u);
+      process.stderr.write(`[hub] Pruned dead peer "${u}"\n`);
     }
   }
 
@@ -306,7 +343,30 @@ export class TandemHub {
     }
   }
 
+  private pingAllPeers(): void {
+    for (const workspace of this.workspaces.values()) {
+      for (const [username, peer] of workspace.peers) {
+        if (!peer.alive) {
+          process.stderr.write(`[hub] Peer "${username}" failed ping, terminating\n`);
+          peer.ws.terminate();
+          workspace.peers.delete(username);
+          this.broadcastToWorkspace(workspace, {
+            kind: 'peer_left',
+            username,
+            peers: Array.from(workspace.peers.keys()),
+          });
+          continue;
+        }
+        peer.alive = false;
+        if (peer.ws.readyState === WebSocket.OPEN) {
+          peer.ws.ping();
+        }
+      }
+    }
+  }
+
   stop(): void {
+    if (this.pingInterval) clearInterval(this.pingInterval);
     for (const workspace of this.workspaces.values()) {
       workspace.db.close();
       for (const peer of workspace.peers.values()) {

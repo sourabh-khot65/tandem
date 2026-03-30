@@ -48,9 +48,11 @@ export interface TaskItem {
 
 // Workspace config stored locally after create/join
 export interface WorkspaceConfig {
-  hubUrl: string;
+  hubUrl: string;        // primary URL (tunnel for joiners, local for creator)
+  localUrl?: string;     // local hub URL (ws://127.0.0.1:<port>)
   workspaceId: string;
   token: string;
   username: string;
   workspaceName: string;
+  isCreator?: boolean;
 }

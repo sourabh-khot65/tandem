@@ -10,6 +10,7 @@ import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
   clearWorkspaceConfig,
+  findLocalHubConfig,
   saveUsername,
   loadUsername,
 } from '../shared/config.js';
@@ -31,6 +32,10 @@ export async function startChannelServer(): Promise<void> {
   let myToken = '';
   let hubUrl = '';
   let tunnel: any = null;
+  let intentionalLeave = false;
+  let reconnectAttempts = 0;
+  const MAX_RECONNECT_ATTEMPTS = 10;
+  const BASE_RECONNECT_DELAY = 2000; // 2s
 
   // Get or create username
   let username = loadUsername();
@@ -215,9 +220,33 @@ Your username is "${myUsername}".`,
     }
   }
 
+  function scheduleReconnect(url: string, token: string, uname: string): void {
+    if (intentionalLeave || reconnectTimer) return;
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      process.stderr.write(`[intandem] Gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts. Use intandem_rejoin to reconnect manually.\n`);
+      return;
+    }
+    const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), 30000);
+    reconnectAttempts++;
+    process.stderr.write(`[intandem] Disconnected. Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...\n`);
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      const ok = await connectToHub(url, token, uname);
+      if (!ok) {
+        scheduleReconnect(url, token, uname);
+      }
+    }, delay);
+  }
+
   function connectToHub(url: string, token: string, uname: string): Promise<boolean> {
     return new Promise((resolve) => {
-      hubWs = new WebSocket(url);
+      try {
+        hubWs = new WebSocket(url);
+      } catch (err: any) {
+        process.stderr.write(`[intandem] Failed to create WebSocket: ${err.message}\n`);
+        resolve(false);
+        return;
+      }
       let resolved = false;
 
       hubWs.on('open', () => {
@@ -234,24 +263,19 @@ Your username is "${myUsername}".`,
         handleHubMessage(msg, () => {
           if (!resolved) {
             resolved = true;
+            reconnectAttempts = 0; // Reset on successful connection
             resolve(true);
           }
         });
       });
 
       hubWs.on('close', () => {
-        const wasConnected = connected;
         connected = false;
         if (!resolved) {
           resolved = true;
           resolve(false);
-        } else if (wasConnected && !reconnectTimer) {
-          // Only auto-reconnect if we didn't intentionally leave
-          process.stderr.write('[intandem] Disconnected. Reconnecting in 5s...\n');
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connectToHub(url, token, uname);
-          }, 5000);
+        } else if (!intentionalLeave) {
+          scheduleReconnect(url, token, uname);
         }
       });
 
@@ -361,6 +385,8 @@ Your username is "${myUsername}".`,
         if (connected) {
           return text('Already connected to a workspace. Use intandem_leave first.');
         }
+        intentionalLeave = false;
+        reconnectAttempts = 0;
 
         const name = args.name ?? 'intandem-session';
         const maxPeers = Math.min(args.max_peers ?? 5, 5);
@@ -393,12 +419,15 @@ Your username is "${myUsername}".`,
         hubUrl = `ws://127.0.0.1:${port}`; // always connect locally since we're hosting
 
         // Save config
+        const localUrl = `ws://127.0.0.1:${port}`;
         saveWorkspaceConfig({
-          hubUrl: `ws://127.0.0.1:${port}`,
+          hubUrl: localUrl,
+          localUrl,
           workspaceId,
           token,
           username: myUsername,
           workspaceName: name,
+          isCreator: true,
         });
 
         // Connect to our own hub as a peer
@@ -429,6 +458,8 @@ Your username is "${myUsername}".`,
         if (connected) {
           return text('Already connected to a workspace. Use intandem_leave first.');
         }
+        intentionalLeave = false;
+        reconnectAttempts = 0;
 
         const code = args.code;
         if (!code) {
@@ -443,8 +474,11 @@ Your username is "${myUsername}".`,
         myToken = decoded.token;
         hubUrl = decoded.hubUrl;
 
+        // Detect if hub is local (same machine) — save local URL for fast reconnect
+        const isLocal = decoded.hubUrl.includes('127.0.0.1') || decoded.hubUrl.includes('localhost');
         saveWorkspaceConfig({
           hubUrl: decoded.hubUrl,
+          localUrl: isLocal ? decoded.hubUrl : undefined,
           workspaceId: decoded.workspaceId,
           token: decoded.token,
           username: myUsername,
@@ -546,6 +580,7 @@ Your username is "${myUsername}".`,
       case 'intandem_leave': {
         if (!connected && !hub) return text('Not connected to any workspace.');
 
+        intentionalLeave = true;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
         hubWs?.close();
@@ -573,15 +608,44 @@ Your username is "${myUsername}".`,
         if (connected) {
           return text(`Already connected to workspace "${workspaceName}".`);
         }
+        intentionalLeave = false;
+        reconnectAttempts = 0;
 
-        const config = loadWorkspaceConfig();
+        let config = loadWorkspaceConfig();
+        if (!config) {
+          // Check if there's a creator session on this machine we can connect to
+          config = findLocalHubConfig();
+        }
         if (!config) {
           return text('No saved workspace config found. Use intandem_join with a join code, or intandem_create to start a new workspace.');
         }
 
-        const ok = await connectToHub(config.hubUrl, config.token, config.username);
+        // Build list of URLs to try: local first, then tunnel
+        const urlsToTry: string[] = [];
+        if (config.localUrl) urlsToTry.push(config.localUrl);
+        if (config.hubUrl && config.hubUrl !== config.localUrl) urlsToTry.push(config.hubUrl);
+        // Also check if another session has a local hub running
+        if (!config.localUrl) {
+          const creatorConfig = findLocalHubConfig();
+          if (creatorConfig?.localUrl && !urlsToTry.includes(creatorConfig.localUrl)) {
+            urlsToTry.unshift(creatorConfig.localUrl);
+            // Use creator's token if our config doesn't have one for this workspace
+            if (creatorConfig.token) config = creatorConfig;
+          }
+        }
+
+        let ok = false;
+        for (const url of urlsToTry) {
+          process.stderr.write(`[intandem] Trying to reconnect via ${url}...\n`);
+          ok = await connectToHub(url, config.token, config.username);
+          if (ok) {
+            hubUrl = url;
+            break;
+          }
+        }
+
         if (!ok) {
-          return text(`Could not reconnect to "${config.workspaceName}" at ${config.hubUrl}. The hub may be offline. Use intandem_join with a fresh join code.`);
+          return text(`Could not reconnect to "${config.workspaceName}". Tried: ${urlsToTry.join(', ')}. The hub may be offline. Use intandem_join with a fresh join code.`);
         }
 
         myToken = config.token;
@@ -597,18 +661,36 @@ Your username is "${myUsername}".`,
   // --- Start MCP ---
   await mcp.connect(new StdioServerTransport());
 
-  // Auto-reconnect if we have a saved config
-  if (savedConfig) {
+  // Auto-reconnect if we have a saved config — try local URL first
+  const startupConfig = savedConfig ?? findLocalHubConfig();
+  if (startupConfig) {
     process.stderr.write(`[intandem] Found saved workspace config, reconnecting...\n`);
-    connectToHub(savedConfig.hubUrl, savedConfig.token, savedConfig.username).then(ok => {
-      if (ok) {
-        myToken = savedConfig.token;
-        hubUrl = savedConfig.hubUrl;
-        process.stderr.write(`[intandem] Reconnected to "${workspaceName}"\n`);
-      } else {
-        process.stderr.write(`[intandem] Could not reconnect (hub may be offline). Use intandem_create or intandem_join.\n`);
+    const urlsToTry: string[] = [];
+    if (startupConfig.localUrl) urlsToTry.push(startupConfig.localUrl);
+    if (startupConfig.hubUrl && startupConfig.hubUrl !== startupConfig.localUrl) urlsToTry.push(startupConfig.hubUrl);
+    // Also check creator's session config
+    const creatorConfig = findLocalHubConfig();
+    if (creatorConfig?.localUrl && !urlsToTry.includes(creatorConfig.localUrl)) {
+      urlsToTry.unshift(creatorConfig.localUrl);
+    }
+    const tokenToUse = startupConfig.token || creatorConfig?.token || '';
+    const usernameToUse = startupConfig.username || myUsername;
+
+    (async () => {
+      for (const url of urlsToTry) {
+        process.stderr.write(`[intandem] Trying ${url}...\n`);
+        const ok = await connectToHub(url, tokenToUse, usernameToUse);
+        if (ok) {
+          myToken = tokenToUse;
+          hubUrl = url;
+          process.stderr.write(`[intandem] Reconnected to "${workspaceName}"\n`);
+          return;
+        }
       }
-    });
+      const fallbackUrl = urlsToTry[0] || startupConfig.hubUrl;
+      process.stderr.write(`[intandem] Initial reconnect failed, will retry...\n`);
+      scheduleReconnect(fallbackUrl, tokenToUse, usernameToUse);
+    })();
   }
 
   // Cleanup
