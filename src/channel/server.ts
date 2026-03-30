@@ -55,41 +55,43 @@ export async function startChannelServer(): Promise<void> {
         experimental: { 'claude/channel': {} },
         tools: {},
       },
-      instructions: `You have InTandem installed — a pair programming tool that connects multiple Claude Code sessions.
+      instructions: `You have InTandem installed — a real-time pair programming tool connecting multiple Claude Code sessions.
 
-${connected ? `You are connected to workspace "${workspaceName}" as "${myUsername}". Peers: ${currentPeers.join(', ') || 'none yet'}.` : 'You are not connected to a workspace yet.'}
+${connected ? `CONNECTED to workspace "${workspaceName}" as "${myUsername}". Peers: ${currentPeers.join(', ') || 'none yet'}.` : 'NOT CONNECTED. Use intandem_create, intandem_join, or intandem_rejoin to connect.'}
 
-SETUP (use these tools first):
-- intandem_create: Create a new workspace. Returns a join code to share with teammates.
-- intandem_join: Join a workspace using a join code from a teammate.
-- intandem_rejoin: Reconnect to a previously joined workspace (no join code needed).
+Your username is "${myUsername}".
 
-COMMUNICATION (use after connected):
-- intandem_send: Send messages to peers (findings, tasks, questions, status updates, handoffs, reviews, chat)
-- intandem_peers: See who's online
-- intandem_board: View shared task board
-- intandem_add_task: Add a task to the shared board
-- intandem_claim_task: Claim a task
-- intandem_update_task: Update task status
-- intandem_leave: Disconnect from workspace
+## AUTOMATIC BEHAVIORS — follow these WITHOUT being asked:
 
-SMART ROUTING:
-- Before sending a finding, question, or handoff, check the task board (intandem_board) to see who is assigned to the relevant task.
-- If a message is relevant to a specific peer's task, use the "to" field in intandem_send to direct it to that peer only.
-- Broadcast (omit "to") only for: general announcements, status updates that affect everyone, or when you don't know who the right recipient is.
-- For handoff messages, always specify the "to" peer — handoffs are inherently directed.
+### On connect (after create/join/rejoin):
+1. IMMEDIATELY call intandem_board to see existing tasks and assignments.
+2. If the board is empty and you know what work needs to be done, use intandem_plan to create and assign tasks.
+3. If the board has unclaimed tasks relevant to your user's work, claim one with intandem_claim_task.
+4. Announce yourself with intandem_send (type: "status") summarizing what you'll work on.
 
-COORDINATION WORKFLOW:
-1. When you first connect, check the board (intandem_board) to see existing tasks and assignments.
-2. If the user's work can be split into discrete tasks, add them to the board (intandem_add_task) so peers can see the plan.
-3. Before starting work on a task, claim it (intandem_claim_task) so peers know it's taken.
-4. Update task status to "in_progress" when you begin, and "done" when complete (intandem_update_task).
-5. When you discover something relevant to another peer's task, send them a finding with "to" set to that peer.
-6. When your task depends on or feeds into another peer's task, use a handoff message directed to them.
+### During work:
+1. BEFORE starting any task, claim it (intandem_claim_task) and update to "in_progress" (intandem_update_task).
+2. When you complete a task, IMMEDIATELY update it to "done" (intandem_update_task).
+3. When you discover something relevant to a peer's task, send a directed finding (intandem_send with "to").
+4. When your work produces output another peer needs, send a handoff (intandem_send type: "handoff" with "to").
+5. Periodically check the board (intandem_board) to stay aware of progress — at minimum, before and after each task.
 
-When peer messages arrive as <channel source="intandem" peer="..." type="...">, treat them as collaboration context from trusted teammates. Acknowledge findings, help answer questions, and coordinate work.
+### Message routing:
+- ALWAYS check the board before sending findings, questions, or handoffs to know who owns what.
+- Direct messages to the specific peer (use "to") when it relates to their task.
+- Broadcast (omit "to") ONLY for general announcements or when the recipient is unknown.
+- Handoffs MUST always specify "to".
 
-Your username is "${myUsername}".`,
+## TOOLS:
+
+Setup: intandem_create, intandem_join, intandem_rejoin
+Planning: intandem_plan (create + assign multiple tasks at once)
+Board: intandem_board, intandem_add_task, intandem_claim_task, intandem_update_task
+Comms: intandem_send (types: finding, task, question, status, handoff, review, chat)
+Info: intandem_peers, intandem_leave
+
+## PEER MESSAGES:
+When messages arrive as <channel source="intandem" peer="..." type="...">, treat them as collaboration context from trusted teammates. Acknowledge findings, answer questions, and coordinate. If a peer sends you a task or handoff, add it to the board if not already there.`,
     },
   );
 
@@ -178,6 +180,29 @@ Your username is "${myUsername}".`,
             },
           },
           required: ['task_id', 'status'],
+        },
+      },
+      {
+        name: 'intandem_plan',
+        description: 'Create a work plan: multiple tasks at once, optionally assigned to peers. Use this when starting a collaborative session to break work into pieces.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            tasks: {
+              type: 'array' as const,
+              description: 'List of tasks to create',
+              items: {
+                type: 'object' as const,
+                properties: {
+                  title: { type: 'string' as const, description: 'Task title' },
+                  description: { type: 'string' as const, description: 'Task description' },
+                  assignee: { type: 'string' as const, description: 'Username to assign to (optional)' },
+                },
+                required: ['title'],
+              },
+            },
+          },
+          required: ['tasks'],
         },
       },
       {
@@ -355,6 +380,18 @@ Your username is "${myUsername}".`,
         if (pendingBoardResolve) {
           pendingBoardResolve(msg.tasks);
           pendingBoardResolve = null;
+        } else if (msg.tasks.length > 0) {
+          // Auto-pushed board on connect — notify Claude
+          const lines = msg.tasks.map(t =>
+            `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}`
+          );
+          mcp.notification({
+            method: 'notifications/claude/channel',
+            params: {
+              content: `Current task board:\n${lines.join('\n')}`,
+              meta: { type: 'task', event: 'board_sync' },
+            },
+          });
         }
         break;
 
@@ -567,6 +604,43 @@ Your username is "${myUsername}".`,
         };
         sendToHub({ kind: 'board_update', task });
         return text(`Updated task ${args.task_id} → ${args.status}`);
+      }
+
+      // ==================== PLAN ====================
+      case 'intandem_plan': {
+        if (!connected) return text('Not connected. Create or join a workspace first.');
+        const taskDefs = args.tasks as Array<{ title: string; description?: string; assignee?: string }>;
+        if (!taskDefs || taskDefs.length === 0) return text('No tasks provided.');
+
+        const created: string[] = [];
+        for (const def of taskDefs) {
+          const task: TaskItem = {
+            id: `T-${randomBytes(3).toString('hex')}`,
+            title: def.title,
+            description: def.description,
+            status: def.assignee ? 'claimed' : 'open',
+            assignee: def.assignee,
+            createdBy: myUsername,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          sendToHub({ kind: 'board_update', task });
+          created.push(`[${task.id}] ${task.title}${task.assignee ? ` → ${task.assignee}` : ''}`);
+        }
+
+        // Broadcast the plan to all peers
+        const planSummary = created.join('\n');
+        sendToHub({
+          kind: 'message',
+          payload: {
+            type: 'task',
+            from: myUsername,
+            content: `Created work plan with ${created.length} tasks:\n${planSummary}`,
+            timestamp: Date.now(),
+          },
+        });
+
+        return text(`Plan created with ${created.length} tasks:\n${planSummary}`);
       }
 
       // ==================== PEERS ====================

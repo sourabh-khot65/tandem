@@ -237,6 +237,25 @@ export class TandemHub {
       peers: Array.from(targetWorkspace.peers.keys()),
     }, username);
 
+    // Auto-push board and recent messages so the peer can self-orient
+    const tasks = targetWorkspace.db.getAllTasks();
+    if (tasks.length > 0) {
+      this.send(ws, { kind: 'board', tasks });
+    }
+    const recentMessages = targetWorkspace.db.getRecentMessages(10);
+    for (const msg of recentMessages) {
+      this.send(ws, {
+        kind: 'message',
+        payload: {
+          type: msg.type as PeerMessage['type'],
+          from: msg.from,
+          to: msg.to,
+          content: msg.content,
+          timestamp: msg.timestamp,
+        },
+      });
+    }
+
     onSuccess(targetWorkspace, username);
   }
 
@@ -275,7 +294,7 @@ export class TandemHub {
     }
   }
 
-  private handleBoardUpdate(workspace: Workspace, from: string, task: TaskItem): void {
+  private handleBoardUpdate(workspace: Workspace, _from: string, task: TaskItem): void {
     const existing = workspace.db.getTask(task.id);
     if (existing) {
       // Only update fields that have meaningful values (non-empty strings)
