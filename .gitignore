@@ -1,5 +1,7 @@
 node_modules/
 dist/
 *.js.map
+*.tgz
 .tandem/
+.mcp.json
 *.db
