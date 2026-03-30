@@ -57,6 +57,7 @@ ${connected ? `You are connected to workspace "${workspaceName}" as "${myUsernam
 SETUP (use these tools first):
 - intandem_create: Create a new workspace. Returns a join code to share with teammates.
 - intandem_join: Join a workspace using a join code from a teammate.
+- intandem_rejoin: Reconnect to a previously joined workspace (no join code needed).
 
 COMMUNICATION (use after connected):
 - intandem_send: Send messages to peers (findings, tasks, questions, status updates, handoffs, reviews, chat)
@@ -66,6 +67,20 @@ COMMUNICATION (use after connected):
 - intandem_claim_task: Claim a task
 - intandem_update_task: Update task status
 - intandem_leave: Disconnect from workspace
+
+SMART ROUTING:
+- Before sending a finding, question, or handoff, check the task board (intandem_board) to see who is assigned to the relevant task.
+- If a message is relevant to a specific peer's task, use the "to" field in intandem_send to direct it to that peer only.
+- Broadcast (omit "to") only for: general announcements, status updates that affect everyone, or when you don't know who the right recipient is.
+- For handoff messages, always specify the "to" peer — handoffs are inherently directed.
+
+COORDINATION WORKFLOW:
+1. When you first connect, check the board (intandem_board) to see existing tasks and assignments.
+2. If the user's work can be split into discrete tasks, add them to the board (intandem_add_task) so peers can see the plan.
+3. Before starting work on a task, claim it (intandem_claim_task) so peers know it's taken.
+4. Update task status to "in_progress" when you begin, and "done" when complete (intandem_update_task).
+5. When you discover something relevant to another peer's task, send them a finding with "to" set to that peer.
+6. When your task depends on or feeds into another peer's task, use a handoff message directed to them.
 
 When peer messages arrive as <channel source="intandem" peer="..." type="...">, treat them as collaboration context from trusted teammates. Acknowledge findings, help answer questions, and coordinate work.
 
@@ -168,6 +183,11 @@ Your username is "${myUsername}".`,
       {
         name: 'intandem_leave',
         description: 'Disconnect from the current workspace',
+        inputSchema: { type: 'object' as const, properties: {} },
+      },
+      {
+        name: 'intandem_rejoin',
+        description: 'Reconnect to a previously joined workspace using saved config (no join code needed)',
         inputSchema: { type: 'object' as const, properties: {} },
       },
     ],
@@ -546,6 +566,27 @@ Your username is "${myUsername}".`,
         clearWorkspaceConfig();
 
         return text('Disconnected from workspace.');
+      }
+
+      // ==================== REJOIN ====================
+      case 'intandem_rejoin': {
+        if (connected) {
+          return text(`Already connected to workspace "${workspaceName}".`);
+        }
+
+        const config = loadWorkspaceConfig();
+        if (!config) {
+          return text('No saved workspace config found. Use intandem_join with a join code, or intandem_create to start a new workspace.');
+        }
+
+        const ok = await connectToHub(config.hubUrl, config.token, config.username);
+        if (!ok) {
+          return text(`Could not reconnect to "${config.workspaceName}" at ${config.hubUrl}. The hub may be offline. Use intandem_join with a fresh join code.`);
+        }
+
+        myToken = config.token;
+        hubUrl = config.hubUrl;
+        return text(`Reconnected to "${workspaceName}" as ${myUsername}!\nPeers online: ${currentPeers.length > 0 ? currentPeers.join(', ') : 'none yet'}`);
       }
 
       default:
