@@ -9,6 +9,7 @@ import { decodeJoinCode, createJoinCode, sanitizeContent } from '../shared/crypt
 import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
+  clearWorkspaceConfig,
   saveUsername,
   loadUsername,
 } from '../shared/config.js';
@@ -219,13 +220,18 @@ Your username is "${myUsername}".`,
       });
 
       hubWs.on('close', () => {
+        const wasConnected = connected;
         connected = false;
         if (!resolved) {
           resolved = true;
           resolve(false);
-        } else {
+        } else if (wasConnected && !reconnectTimer) {
+          // Only auto-reconnect if we didn't intentionally leave
           process.stderr.write('[intandem] Disconnected. Reconnecting in 5s...\n');
-          reconnectTimer = setTimeout(() => connectToHub(url, token, uname), 5000);
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectToHub(url, token, uname);
+          }, 5000);
         }
       });
 
@@ -521,6 +527,7 @@ Your username is "${myUsername}".`,
         if (!connected && !hub) return text('Not connected to any workspace.');
 
         if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
         hubWs?.close();
         hubWs = null;
         connected = false;
@@ -534,6 +541,9 @@ Your username is "${myUsername}".`,
           hub.stop();
           hub = null;
         }
+
+        // Clear saved config so auto-reconnect doesn't kick in
+        clearWorkspaceConfig();
 
         return text('Disconnected from workspace.');
       }
