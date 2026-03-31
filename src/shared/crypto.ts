@@ -1,4 +1,4 @@
-import { randomBytes, createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 // Generate a workspace ID: TNM-XXXX-XXXX (easy to read/share)
 export function generateWorkspaceId(): string {
@@ -36,23 +36,6 @@ export function decodeJoinCode(code: string): { hubUrl: string; workspaceId: str
   } catch {
     return null;
   }
-}
-
-// Sign a message with the workspace token (HMAC-SHA256)
-export function signMessage(payload: string, token: string): string {
-  return createHmac('sha256', token).update(payload).digest('base64url');
-}
-
-// Verify a signed message
-export function verifySignature(payload: string, signature: string, token: string): boolean {
-  const expected = signMessage(payload, token);
-  // Constant-time comparison
-  if (expected.length !== signature.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < expected.length; i++) {
-    mismatch |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
-  }
-  return mismatch === 0;
 }
 
 // Sanitize content to prevent prompt injection via channel tags

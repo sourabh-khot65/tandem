@@ -17,9 +17,9 @@ npm run format:check   # Check formatting without writing
 npm run lint           # Run typecheck + format:check
 ```
 
-Code quality is enforced via git hooks (husky):
+Code quality is enforced via git hooks (husky + lint-staged + commitlint):
 
-- **pre-commit**: lint-staged runs Prettier and TypeScript check on staged files
+- **pre-commit**: lint-staged runs Prettier on staged files + tsc --noEmit once
 - **commit-msg**: commitlint enforces conventional commit messages (e.g., `fix:`, `feat:`, `chore:`)
 
 No test framework is configured.
@@ -28,11 +28,16 @@ No test framework is configured.
 
 The system has three layers:
 
-1. **Channel (`src/channel/server.ts`)** — An MCP server that Claude Code spawns as a subprocess. It defines all user-facing tools (create, join, send, board, etc.) and manages the connection lifecycle. When creating a workspace, it starts an embedded Hub and opens a localtunnel for remote access. Communicates with Claude via MCP notifications using `notifications/claude/channel`.
+1. **Channel (`src/channel/`)** — An MCP server that Claude Code spawns as a subprocess. Split into four files:
+   - `server.ts` — Orchestrator: wires MCP server, connection, message handler, and tool handlers together.
+   - `connection.ts` — `HubConnection` class managing WebSocket lifecycle, reconnect with generation counter.
+   - `handlers.ts` — Tool call handler functions (create, join, send, board, etc.).
+   - `tools.ts` — Tool definitions (JSON schemas for each MCP tool).
+     When creating a workspace, it starts an embedded Hub and opens a localtunnel for remote access. Communicates with Claude via MCP notifications using `notifications/claude/channel`.
 
 2. **Hub (`src/hub/server.ts`)** — A WebSocket server that routes messages between peers. Handles auth (token-based), rate limiting (30 msgs/min per peer), peer lifecycle, and task board operations. Each workspace gets its own SQLite database via `TandemDB`.
 
-3. **Shared (`src/shared/`)** — Protocol types (`types.ts`), crypto utilities (`crypto.ts` — join codes are base64url-encoded JSON containing hub URL + workspace ID + token), username generation (`names.ts`), and config management (`config.ts` — persists to `~/.tandem/`).
+3. **Shared (`src/shared/`)** — Protocol types (`types.ts`), crypto utilities (`crypto.ts` — join codes, tokens, content sanitization), username generation (`names.ts`), and config management (`config.ts` — per-PID session files in `~/.tandem/sessions/` with stale PID cleanup).
 
 **CLI (`src/cli.ts`)** — Thin entry point for `intandem init` (writes `.mcp.json`), `intandem whoami`, `intandem rename`, and `intandem channel` (starts the MCP server — not meant to be run manually).
 
@@ -45,7 +50,7 @@ Claude A -> MCP tool call -> Channel server -> WebSocket Hub -> Channel server -
 - The Channel server is an all-in-one process: it embeds the Hub when creating a workspace (no separate server process).
 - Join codes encode `{hubUrl, workspaceId, token}` as base64url JSON — the token is the sole auth mechanism.
 - Content sanitization (`sanitizeContent`) escapes `<`/`>` to prevent prompt injection via channel tags.
-- Workspace config persists to `~/.tandem/config.json` for auto-reconnect on Claude Code restart.
+- Workspace config persists per-PID in `~/.tandem/sessions/<PID>.json` (stale PIDs auto-cleaned on startup).
 - SQLite databases live at `~/.tandem/data/<workspaceId>.db` with WAL mode.
 - The hub is ephemeral — when the creator's session ends, it shuts down.
 

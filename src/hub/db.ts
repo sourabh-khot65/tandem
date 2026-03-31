@@ -6,6 +6,39 @@ import type { TaskItem } from '../shared/types.js';
 
 const DATA_DIR = join(homedir(), '.tandem', 'data');
 
+interface TaskRow {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  assignee: string | null;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface MessageRow {
+  id: number;
+  type: string;
+  from_user: string;
+  to_user: string | null;
+  content: string;
+  timestamp: number;
+}
+
+function rowToTask(row: TaskRow): TaskItem {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? undefined,
+    status: row.status as TaskItem['status'],
+    assignee: row.assignee ?? undefined,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 export class TandemDB {
   private db: Database.Database;
 
@@ -13,7 +46,6 @@ export class TandemDB {
     if (!existsSync(DATA_DIR)) {
       mkdirSync(DATA_DIR, { recursive: true });
     }
-    // Sanitize workspace ID for filename
     const safeId = workspaceId.replace(/[^a-zA-Z0-9-]/g, '_');
     this.db = new Database(join(DATA_DIR, `${safeId}.db`));
     this.db.pragma('journal_mode = WAL');
@@ -44,14 +76,11 @@ export class TandemDB {
     `);
   }
 
-  // Task operations
   createTask(task: TaskItem): void {
     this.db
       .prepare(
-        `
-      INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `,
+        `INSERT INTO tasks (id, title, description, status, assignee, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -72,72 +101,61 @@ export class TandemDB {
     const task = this.getTask(id);
     if (!task) return null;
 
+    const sets: string[] = [];
+    const values: unknown[] = [];
     const now = Date.now();
+
     if (updates.status !== undefined) {
-      this.db.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run(updates.status, now, id);
+      sets.push('status = ?');
+      values.push(updates.status);
     }
     if (updates.assignee !== undefined) {
-      this.db.prepare('UPDATE tasks SET assignee = ?, updated_at = ? WHERE id = ?').run(updates.assignee, now, id);
+      sets.push('assignee = ?');
+      values.push(updates.assignee);
     }
     if (updates.title !== undefined) {
-      this.db.prepare('UPDATE tasks SET title = ?, updated_at = ? WHERE id = ?').run(updates.title, now, id);
+      sets.push('title = ?');
+      values.push(updates.title);
     }
     if (updates.description !== undefined) {
-      this.db
-        .prepare('UPDATE tasks SET description = ?, updated_at = ? WHERE id = ?')
-        .run(updates.description ?? null, now, id);
+      sets.push('description = ?');
+      values.push(updates.description ?? null);
     }
+
+    if (sets.length === 0) return task;
+
+    sets.push('updated_at = ?');
+    values.push(now);
+    values.push(id);
+
+    this.db.prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...values);
     return this.getTask(id);
   }
 
   getTask(id: string): TaskItem | null {
-    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as any;
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
     if (!row) return null;
-    return {
-      id: row.id,
-      title: row.title,
-      description: row.description,
-      status: row.status,
-      assignee: row.assignee,
-      createdBy: row.created_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return rowToTask(row);
   }
 
   getAllTasks(): TaskItem[] {
-    const rows = this.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC').all() as any[];
-    return rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      description: row.description,
-      status: row.status,
-      assignee: row.assignee,
-      createdBy: row.created_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    const rows = this.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC').all() as TaskRow[];
+    return rows.map(rowToTask);
   }
 
-  // Message log (recent messages for context when a new peer joins)
   logMessage(msg: { type: string; from: string; to?: string; content: string; timestamp: number }): void {
     this.db
       .prepare(
-        `
-      INSERT INTO messages (type, from_user, to_user, content, timestamp)
-      VALUES (?, ?, ?, ?, ?)
-    `,
+        `INSERT INTO messages (type, from_user, to_user, content, timestamp)
+         VALUES (?, ?, ?, ?, ?)`,
       )
       .run(msg.type, msg.from, msg.to ?? null, msg.content, msg.timestamp);
 
-    // Keep only last 100 messages
     this.db
       .prepare(
-        `
-      DELETE FROM messages WHERE id NOT IN (
-        SELECT id FROM messages ORDER BY id DESC LIMIT 100
-      )
-    `,
+        `DELETE FROM messages WHERE id NOT IN (
+          SELECT id FROM messages ORDER BY id DESC LIMIT 100
+        )`,
       )
       .run();
   }
@@ -145,7 +163,7 @@ export class TandemDB {
   getRecentMessages(
     limit = 20,
   ): Array<{ type: string; from: string; to?: string; content: string; timestamp: number }> {
-    const rows = this.db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as any[];
+    const rows = this.db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as MessageRow[];
     return rows.reverse().map((row) => ({
       type: row.type,
       from: row.from_user,

@@ -117,6 +117,8 @@ Once connected, Claude has these tools:
 | `intandem_add_task`    | Add a task to the board                                                          |
 | `intandem_claim_task`  | Claim a task                                                                     |
 | `intandem_update_task` | Update a task's status                                                           |
+| `intandem_plan`        | Create multiple tasks at once, optionally assigned to peers                      |
+| `intandem_rejoin`      | Reconnect to a previously joined workspace (no join code needed)                 |
 | `intandem_leave`       | Disconnect                                                                       |
 
 You don't call these tools directly — just talk to Claude naturally:
@@ -178,13 +180,18 @@ src/
   shared/
     types.ts      # Protocol types
     names.ts      # Username generator
-    crypto.ts     # Tokens, join codes, HMAC, sanitization
-    config.ts     # ~/.tandem/ config management
+    crypto.ts     # Tokens, join codes, sanitization
+    config.ts     # ~/.tandem/ config management (per-PID sessions)
   hub/
-    server.ts     # WebSocket hub (routing, auth, rate limiting)
+    server.ts     # WebSocket hub (routing, auth, rate limiting, ping/pong)
     db.ts         # SQLite persistence (task board + message log)
   channel/
-    server.ts     # All-in-one MCP server (hub + channel + tunnel)
+    server.ts     # MCP server orchestrator
+    connection.ts # WebSocket connection manager (reconnect, generation counter)
+    handlers.ts   # Tool call handler functions
+    tools.ts      # Tool definitions (JSON schemas)
+  types/
+    localtunnel.d.ts  # Type declarations for localtunnel
   cli.ts          # CLI (init, whoami, rename)
   index.ts        # Public API
 ```
@@ -220,6 +227,8 @@ cd tandem
 npm install
 npm run build
 npm run dev          # watch mode
+npm run lint         # typecheck + format check
+npm run format       # auto-format with Prettier
 ```
 
 ## License

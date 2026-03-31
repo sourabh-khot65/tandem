@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { WorkspaceConfig } from './types.js';
@@ -57,25 +57,55 @@ export function clearWorkspaceConfig(): void {
   }
 }
 
-/**
- * Find any session config that has a localUrl with the given port,
- * useful for finding the hub's actual local address from another session.
- */
-export function findLocalHubConfig(): WorkspaceConfig | null {
+/** Remove session files whose PIDs are no longer running. */
+export function cleanStaleSessions(): void {
   ensureConfigDir();
   try {
     const files = readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
     for (const f of files) {
+      const pid = parseInt(f.replace('.json', ''), 10);
+      if (isNaN(pid)) continue;
       try {
-        const data = readFileSync(join(SESSIONS_DIR, f), 'utf-8');
+        process.kill(pid, 0); // throws if process doesn't exist
+      } catch {
+        try {
+          unlinkSync(join(SESSIONS_DIR, f));
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  } catch {
+    /* dir doesn't exist */
+  }
+}
+
+/**
+ * Find the most recent creator session config with a localUrl,
+ * useful for finding the hub's actual local address from another session.
+ */
+export function findLocalHubConfig(): WorkspaceConfig | null {
+  ensureConfigDir();
+  cleanStaleSessions();
+  try {
+    const files = readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
+    let best: { config: WorkspaceConfig; mtime: number } | null = null;
+    for (const f of files) {
+      try {
+        const filePath = join(SESSIONS_DIR, f);
+        const data = readFileSync(filePath, 'utf-8');
         const config: WorkspaceConfig = JSON.parse(data);
         if (config.isCreator && config.localUrl) {
-          return config;
+          const mtime = statSync(filePath).mtimeMs;
+          if (!best || mtime > best.mtime) {
+            best = { config, mtime };
+          }
         }
       } catch {
         /* skip bad files */
       }
     }
+    return best?.config ?? null;
   } catch {
     /* dir doesn't exist */
   }
@@ -93,8 +123,4 @@ export function loadUsername(): string | null {
   } catch {
     return null;
   }
-}
-
-export function getConfigDir(): string {
-  return CONFIG_DIR;
 }

@@ -1,7 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
-import { generateWorkspaceId, generateToken, createJoinCode, signMessage, verifySignature } from '../shared/crypto.js';
+import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
 import type { HubMessage, PeerInfo, PeerMessage, TaskItem } from '../shared/types.js';
 
 interface ConnectedPeer {
@@ -34,8 +33,9 @@ export class TandemHub {
   private rateLimitWindow = 60_000; // 1 minute
   private maxMessagesPerWindow = 30;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private rateLimitInterval: ReturnType<typeof setInterval> | null = null;
 
-  createWorkspace(name: string, maxPeers = 5): { workspaceId: string; token: string; joinCode: string } {
+  createWorkspace(name: string, maxPeers = 5): { workspaceId: string; token: string } {
     const workspaceId = generateWorkspaceId();
     const token = generateToken();
 
@@ -49,7 +49,7 @@ export class TandemHub {
     };
 
     this.workspaces.set(workspaceId, workspace);
-    return { workspaceId, token, joinCode: '' }; // joinCode set after hub URL is known
+    return { workspaceId, token };
   }
 
   start(options: HubOptions): Promise<{ port: number; joinCodes: Map<string, string> }> {
@@ -77,7 +77,7 @@ export class TandemHub {
       this.wss.on('connection', (ws) => this.handleConnection(ws));
 
       // Rate limit reset timer
-      setInterval(() => this.resetRateLimits(), this.rateLimitWindow);
+      this.rateLimitInterval = setInterval(() => this.resetRateLimits(), this.rateLimitWindow);
 
       // Ping all peers every 30s to detect dead connections
       this.pingInterval = setInterval(() => this.pingAllPeers(), 30_000);
@@ -384,16 +384,12 @@ export class TandemHub {
 
   private pingAllPeers(): void {
     for (const workspace of this.workspaces.values()) {
+      const dead: string[] = [];
       for (const [username, peer] of workspace.peers) {
         if (!peer.alive) {
           process.stderr.write(`[hub] Peer "${username}" failed ping, terminating\n`);
           peer.ws.terminate();
-          workspace.peers.delete(username);
-          this.broadcastToWorkspace(workspace, {
-            kind: 'peer_left',
-            username,
-            peers: Array.from(workspace.peers.keys()),
-          });
+          dead.push(username);
           continue;
         }
         peer.alive = false;
@@ -401,11 +397,20 @@ export class TandemHub {
           peer.ws.ping();
         }
       }
+      for (const username of dead) {
+        workspace.peers.delete(username);
+        this.broadcastToWorkspace(workspace, {
+          kind: 'peer_left',
+          username,
+          peers: Array.from(workspace.peers.keys()),
+        });
+      }
     }
   }
 
   stop(): void {
     if (this.pingInterval) clearInterval(this.pingInterval);
+    if (this.rateLimitInterval) clearInterval(this.rateLimitInterval);
     for (const workspace of this.workspaces.values()) {
       workspace.db.close();
       for (const peer of workspace.peers.values()) {

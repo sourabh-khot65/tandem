@@ -31,7 +31,7 @@ function cmdInit(): void {
   const username = getOrCreateUsername();
 
   const mcpPath = join(process.cwd(), '.mcp.json');
-  let mcpConfig: any = {};
+  let mcpConfig: Record<string, unknown> = {};
 
   if (existsSync(mcpPath)) {
     try {
@@ -41,11 +41,11 @@ function cmdInit(): void {
     }
   }
 
-  if (!mcpConfig.mcpServers) {
+  if (!mcpConfig.mcpServers || typeof mcpConfig.mcpServers !== 'object') {
     mcpConfig.mcpServers = {};
   }
 
-  mcpConfig.mcpServers.intandem = {
+  (mcpConfig.mcpServers as Record<string, unknown>).intandem = {
     command: 'npx',
     args: ['intandem', 'channel'],
   };
