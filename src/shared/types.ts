@@ -11,7 +11,7 @@ export interface PeerMessage {
 
 // Hub protocol messages (WebSocket frames)
 export type HubMessage =
-  | { kind: 'auth'; token: string; username: string }
+  | { kind: 'auth'; token: string; username: string; sessionId: string }
   | { kind: 'auth_ok'; workspace: WorkspaceInfo }
   | { kind: 'auth_fail'; reason: string }
   | { kind: 'peer_joined'; username: string; peers: string[] }

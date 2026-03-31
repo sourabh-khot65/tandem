@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { randomBytes } from 'node:crypto';
 import type { HubMessage } from '../shared/types.js';
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -12,6 +13,8 @@ export class HubConnection {
   private generation = 0;
   private _intentionalLeave = false;
 
+  /** Unique per-process ID so the hub can distinguish reconnects from different sessions with the same username */
+  readonly sessionId = randomBytes(8).toString('hex');
   connected = false;
 
   constructor(private onMessage: (msg: HubMessage) => void) {}
@@ -54,9 +57,10 @@ export class HubConnection {
     );
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
-      if (gen !== this.generation) return;
+      if (gen !== this.generation) return; // a newer connect/create/join superseded us
       const ok = await this.connect(url, token, username);
-      if (!ok && gen === this.generation) {
+      // connect() bumps this.generation, so check gen+1 (our connect was the last one)
+      if (!ok && gen + 1 === this.generation) {
         this.scheduleReconnect(url, token, username);
       }
     }, delay);
@@ -88,7 +92,7 @@ export class HubConnection {
           ws.close();
           return;
         }
-        ws.send(JSON.stringify({ kind: 'auth', token, username }));
+        ws.send(JSON.stringify({ kind: 'auth', token, username, sessionId: this.sessionId }));
       });
 
       ws.on('message', (data) => {
@@ -122,13 +126,16 @@ export class HubConnection {
       });
 
       ws.on('close', () => {
-        if (gen === this.generation) {
+        // Only touch connected/reconnect if this ws is the currently adopted one.
+        // A failed connect (never adopted) must not clobber state from a live connection.
+        const isActive = this.ws === ws;
+        if (isActive) {
           this.connected = false;
         }
         if (!resolved) {
           resolved = true;
           resolve(false);
-        } else if (gen === this.generation && !this._intentionalLeave) {
+        } else if (isActive && !this._intentionalLeave) {
           this.scheduleReconnect(url, token, username);
         }
       });

@@ -85,6 +85,17 @@ async function handleCreate(
   conn.cancelReconnect();
   conn.intentionalLeave = false;
 
+  // Clean up any orphaned hub/tunnel from a previous create
+  conn.disconnect();
+  if (state.tunnel) {
+    state.tunnel.close();
+    state.tunnel = null;
+  }
+  if (state.hub) {
+    state.hub.stop();
+    state.hub = null;
+  }
+
   const name = (args.name as string) ?? 'intandem-session';
   const maxPeers = Math.min((args.max_peers as number) ?? 5, 5);
 
@@ -152,6 +163,17 @@ async function handleJoin(
   }
   conn.cancelReconnect();
   conn.intentionalLeave = false;
+
+  // Clean up any orphaned hub/tunnel from a previous session
+  conn.disconnect();
+  if (state.tunnel) {
+    state.tunnel.close();
+    state.tunnel = null;
+  }
+  if (state.hub) {
+    state.hub.stop();
+    state.hub = null;
+  }
 
   const code = args.code as string;
   if (!code) {

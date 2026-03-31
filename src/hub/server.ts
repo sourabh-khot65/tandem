@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
 import type { HubMessage, PeerInfo, PeerMessage, TaskItem } from '../shared/types.js';
@@ -6,6 +7,7 @@ import type { HubMessage, PeerInfo, PeerMessage, TaskItem } from '../shared/type
 interface ConnectedPeer {
   ws: WebSocket;
   username: string;
+  sessionId: string;
   connectedAt: number;
   currentTask?: string;
   lastMessageAt: number;
@@ -19,6 +21,7 @@ interface Workspace {
   token: string;
   maxPeers: number;
   peers: Map<string, ConnectedPeer>;
+  knownSessions: Set<string>; // sessionIds that have connected before (skip replay on reconnect)
   db: TandemDB;
 }
 
@@ -45,6 +48,7 @@ export class TandemHub {
       token,
       maxPeers: Math.min(maxPeers, 5),
       peers: new Map(),
+      knownSessions: new Set(),
       db: new TandemDB(workspaceId),
     };
 
@@ -195,18 +199,26 @@ export class TandemHub {
       return;
     }
 
-    // Check username collision — kick the stale connection and reuse the name
+    // Check username collision
     let username = msg.username;
     const existingPeer = targetWorkspace.peers.get(username);
     if (existingPeer) {
-      process.stderr.write(`[hub] Replacing stale connection for "${username}"\n`);
-      existingPeer.ws.close();
-      targetWorkspace.peers.delete(username);
+      if (existingPeer.sessionId === msg.sessionId) {
+        // Same session reconnecting — kick stale connection, reuse name
+        process.stderr.write(`[hub] Replacing stale connection for "${username}" (same session)\n`);
+        existingPeer.ws.close();
+        targetWorkspace.peers.delete(username);
+      } else {
+        // Different session with same username — append suffix to avoid kick loop
+        username = `${username}-${randomBytes(2).toString('hex')}`;
+        process.stderr.write(`[hub] Username collision, renamed to "${username}"\n`);
+      }
     }
 
     const peer: ConnectedPeer = {
       ws,
       username,
+      sessionId: msg.sessionId,
       connectedAt: Date.now(),
       lastMessageAt: 0,
       messageCount: 0,
@@ -241,23 +253,28 @@ export class TandemHub {
       username,
     );
 
-    // Auto-push board and recent messages so the peer can self-orient
+    // Auto-push board and recent messages only on first connect (not reconnect)
+    const isFirstConnect = !targetWorkspace.knownSessions.has(msg.sessionId);
+    targetWorkspace.knownSessions.add(msg.sessionId);
+
     const tasks = targetWorkspace.db.getAllTasks();
     if (tasks.length > 0) {
       this.send(ws, { kind: 'board', tasks });
     }
-    const recentMessages = targetWorkspace.db.getRecentMessages(10);
-    for (const msg of recentMessages) {
-      this.send(ws, {
-        kind: 'message',
-        payload: {
-          type: msg.type as PeerMessage['type'],
-          from: msg.from,
-          to: msg.to,
-          content: msg.content,
-          timestamp: msg.timestamp,
-        },
-      });
+    if (isFirstConnect) {
+      const recentMessages = targetWorkspace.db.getRecentMessages(10);
+      for (const recentMsg of recentMessages) {
+        this.send(ws, {
+          kind: 'message',
+          payload: {
+            type: recentMsg.type as PeerMessage['type'],
+            from: recentMsg.from,
+            to: recentMsg.to,
+            content: recentMsg.content,
+            timestamp: recentMsg.timestamp,
+          },
+        });
+      }
     }
 
     onSuccess(targetWorkspace, username);
