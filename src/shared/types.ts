@@ -33,7 +33,6 @@ export interface WorkspaceInfo {
 export interface PeerInfo {
   username: string;
   connectedAt: number;
-  currentTask?: string;
 }
 
 export interface TaskItem {
@@ -56,4 +55,5 @@ export interface WorkspaceConfig {
   username: string;
   workspaceName: string;
   isCreator?: boolean;
+  maxPeers?: number; // needed for hub adoption
 }

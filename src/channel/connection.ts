@@ -12,12 +12,22 @@ export class HubConnection {
   private reconnectAttempts = 0;
   private generation = 0;
   private _intentionalLeave = false;
+  private lastPongAt = 0;
 
   /** Unique per-process ID so the hub can distinguish reconnects from different sessions with the same username */
   readonly sessionId = randomBytes(8).toString('hex');
   connected = false;
 
+  /** Called when auto-reconnect permanently fails (all attempts exhausted) */
+  onReconnectFailed: (() => void) | null = null;
+
   constructor(private onMessage: (msg: HubMessage) => void) {}
+
+  /** Returns ms since last successful pong, or -1 if never received */
+  get lastHealthPing(): number {
+    if (this.lastPongAt === 0) return -1;
+    return Date.now() - this.lastPongAt;
+  }
 
   get intentionalLeave(): boolean {
     return this._intentionalLeave;
@@ -47,6 +57,7 @@ export class HubConnection {
       process.stderr.write(
         `[intandem] Gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts. Use intandem_rejoin to reconnect manually.\n`,
       );
+      this.onReconnectFailed?.();
       return;
     }
     const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts), 30000);
@@ -87,12 +98,23 @@ export class HubConnection {
         return true;
       };
 
+      const done = (result: boolean): void => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
+        resolve(result);
+      };
+
       ws.on('open', () => {
         if (gen !== this.generation) {
           ws.close();
           return;
         }
         ws.send(JSON.stringify({ kind: 'auth', token, username, sessionId: this.sessionId }));
+      });
+
+      ws.on('pong', () => {
+        this.lastPongAt = Date.now();
       });
 
       ws.on('message', (data) => {
@@ -109,15 +131,14 @@ export class HubConnection {
 
         // Detect auth_ok to resolve the connect promise
         if (msg.kind === 'auth_ok' && !resolved) {
-          resolved = true;
           this.reconnectAttempts = 0;
           if (adopt()) {
             this.connected = true;
             this.onMessage(msg);
-            resolve(true);
+            done(true);
           } else {
             ws.close();
-            resolve(false);
+            done(false);
           }
           return;
         }
@@ -133,8 +154,7 @@ export class HubConnection {
           this.connected = false;
         }
         if (!resolved) {
-          resolved = true;
-          resolve(false);
+          done(false);
         } else if (isActive && !this._intentionalLeave) {
           this.scheduleReconnect(url, token, username);
         }
@@ -142,17 +162,13 @@ export class HubConnection {
 
       ws.on('error', (err) => {
         process.stderr.write(`[intandem] Connection error: ${err.message}\n`);
-        if (!resolved) {
-          resolved = true;
-          resolve(false);
-        }
+        done(false);
       });
 
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (!resolved) {
-          resolved = true;
           if (gen === this.generation) ws.close();
-          resolve(false);
+          done(false);
         }
       }, CONNECT_TIMEOUT);
     });

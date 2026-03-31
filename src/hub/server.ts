@@ -2,14 +2,16 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
-import type { HubMessage, PeerInfo, PeerMessage, TaskItem } from '../shared/types.js';
+import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType } from '../shared/types.js';
+
+const VALID_MESSAGE_TYPES: MessageType[] = ['finding', 'task', 'question', 'status', 'handoff', 'review', 'chat'];
+const VALID_TASK_STATUSES: TaskItem['status'][] = ['open', 'claimed', 'in_progress', 'done'];
 
 interface ConnectedPeer {
   ws: WebSocket;
   username: string;
   sessionId: string;
   connectedAt: number;
-  currentTask?: string;
   lastMessageAt: number;
   messageCount: number; // rolling window for rate limiting
   alive: boolean; // ping/pong liveness tracking
@@ -54,6 +56,20 @@ export class TandemHub {
 
     this.workspaces.set(workspaceId, workspace);
     return { workspaceId, token };
+  }
+
+  /** Adopt an existing workspace (reuses the SQLite DB). Used for hub ownership transfer. */
+  adoptWorkspace(workspaceId: string, name: string, token: string, maxPeers = 5): void {
+    const workspace: Workspace = {
+      id: workspaceId,
+      name,
+      token,
+      maxPeers: Math.min(maxPeers, 5),
+      peers: new Map(),
+      knownSessions: new Set(),
+      db: new TandemDB(workspaceId), // reuses existing DB file
+    };
+    this.workspaces.set(workspaceId, workspace);
   }
 
   start(options: HubOptions): Promise<{ port: number; joinCodes: Map<string, string> }> {
@@ -264,6 +280,7 @@ export class TandemHub {
     if (isFirstConnect) {
       const recentMessages = targetWorkspace.db.getRecentMessages(10);
       for (const recentMsg of recentMessages) {
+        if (!VALID_MESSAGE_TYPES.includes(recentMsg.type as MessageType)) continue;
         this.send(ws, {
           kind: 'message',
           payload: {
@@ -316,6 +333,10 @@ export class TandemHub {
   }
 
   private handleBoardUpdate(ws: WebSocket, workspace: Workspace, from: string, task: TaskItem): void {
+    if (!VALID_TASK_STATUSES.includes(task.status)) {
+      this.send(ws, { kind: 'error', message: `Invalid task status: ${task.status}` });
+      return;
+    }
     const existing = workspace.db.getTask(task.id);
     if (existing) {
       // Reject claim if task is already taken by someone else
@@ -361,7 +382,6 @@ export class TandemHub {
       list.push({
         username,
         connectedAt: peer.connectedAt,
-        currentTask: peer.currentTask,
       });
     }
     this.send(ws, { kind: 'peers', list });

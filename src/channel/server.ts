@@ -14,7 +14,7 @@ import type { HubMessage } from '../shared/types.js';
 
 import { HubConnection } from './connection.js';
 import { TOOL_DEFINITIONS } from './tools.js';
-import { handleToolCall, type ChannelState } from './handlers.js';
+import { handleToolCall, promoteToHub, type ChannelState } from './handlers.js';
 
 function buildInstructions(state: ChannelState, connected: boolean): string {
   return `You have InTandem installed — a real-time pair programming tool connecting multiple Claude Code sessions.
@@ -174,6 +174,37 @@ export async function startChannelServer(): Promise<void> {
   }
 
   const conn = new HubConnection(handleHubMessage);
+
+  // When auto-reconnect exhausts all attempts, try to become the new hub
+  conn.onReconnectFailed = () => {
+    if (state.hub) return; // we're already the hub, don't promote
+    promoteToHub(conn, state).then((result) => {
+      if (result.ok) {
+        const lines = [
+          `Hub owner disconnected. This session is now the hub for "${state.workspaceName}".`,
+          `Local peers will auto-reconnect.`,
+        ];
+        if (result.joinCode) {
+          lines.push(`Remote peers need this new join code: ${result.joinCode}`);
+        }
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: lines.join('\n'),
+            meta: { type: 'status', event: 'hub_promoted' },
+          },
+        });
+      } else {
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Lost connection to workspace. Hub is offline and promotion failed. Use intandem_create to start a new workspace.`,
+            meta: { type: 'status', event: 'hub_lost' },
+          },
+        });
+      }
+    });
+  };
 
   // --- MCP Server ---
   const mcp = new Server(

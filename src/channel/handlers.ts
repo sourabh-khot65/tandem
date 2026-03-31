@@ -28,6 +28,83 @@ export interface ChannelState {
   pendingBoardResolve: ((tasks: TaskItem[]) => void) | null;
 }
 
+/**
+ * Attempt to become the new hub when the original creator disconnects.
+ * Starts a new TandemHub using the existing workspace DB, opens a tunnel,
+ * and connects as a peer. Returns true if promotion succeeded.
+ */
+export interface PromotionResult {
+  ok: boolean;
+  joinCode?: string; // new join code for remote peers to reconnect
+}
+
+/**
+ * Attempt to become the new hub when the original creator disconnects.
+ * Starts a new TandemHub using the existing workspace DB, opens a tunnel,
+ * and connects as a peer. Returns the new join code so remote peers can reconnect.
+ */
+export async function promoteToHub(conn: HubConnection, state: ChannelState): Promise<PromotionResult> {
+  const config = loadWorkspaceConfig();
+  if (!config) return { ok: false };
+
+  process.stderr.write(`[intandem] Hub appears dead. Attempting to become new hub for "${config.workspaceName}"...\n`);
+
+  // Clean up old state
+  conn.disconnect();
+  if (state.tunnel) {
+    state.tunnel.close();
+    state.tunnel = null;
+  }
+  if (state.hub) {
+    state.hub.stop();
+    state.hub = null;
+  }
+
+  try {
+    state.hub = new TandemHub();
+    state.hub.adoptWorkspace(config.workspaceId, config.workspaceName, config.token, config.maxPeers ?? 5);
+    const { port } = await state.hub.start({ port: 0, host: '127.0.0.1' });
+
+    // Try to open tunnel for remote peers
+    let publicUrl = `ws://127.0.0.1:${port}`;
+    try {
+      state.tunnel = await localtunnel({ port });
+      publicUrl = state.tunnel.url.replace('https://', 'wss://').replace('http://', 'ws://');
+      process.stderr.write(`[intandem] New tunnel open: ${state.tunnel.url}\n`);
+      state.tunnel.on('close', () => {
+        process.stderr.write('[intandem] Tunnel closed\n');
+        state.tunnel = null;
+      });
+    } catch {
+      process.stderr.write(`[intandem] Tunnel failed, local-only mode\n`);
+    }
+
+    const localUrl = `ws://127.0.0.1:${port}`;
+    saveWorkspaceConfig({
+      hubUrl: localUrl,
+      localUrl,
+      workspaceId: config.workspaceId,
+      token: config.token,
+      username: state.myUsername,
+      workspaceName: config.workspaceName,
+      isCreator: true,
+      maxPeers: config.maxPeers ?? 5,
+    });
+
+    const ok = await conn.connect(localUrl, config.token, state.myUsername);
+    if (ok) {
+      const joinCode = createJoinCode(publicUrl, config.workspaceId, config.token);
+      process.stderr.write(`[intandem] Promoted to hub owner for "${config.workspaceName}"\n`);
+      return { ok: true, joinCode };
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[intandem] Hub promotion failed: ${message}\n`);
+  }
+
+  return { ok: false };
+}
+
 function waitForBoard(state: ChannelState): Promise<TaskItem[]> {
   return new Promise((resolve) => {
     state.pendingBoardResolve = resolve;
@@ -111,7 +188,21 @@ async function handleCreate(
     publicUrl = tunnelUrl.replace('https://', 'wss://').replace('http://', 'ws://');
     process.stderr.write(`[intandem] Tunnel open: ${tunnelUrl}\n`);
     state.tunnel.on('close', () => {
-      process.stderr.write('[intandem] Tunnel closed\n');
+      process.stderr.write('[intandem] Tunnel closed — remote peers may lose access. Local connections unaffected.\n');
+      state.tunnel = null;
+      // Try to reopen tunnel
+      localtunnel({ port })
+        .then((newTunnel) => {
+          state.tunnel = newTunnel;
+          process.stderr.write(`[intandem] Tunnel reopened: ${newTunnel.url}\n`);
+          newTunnel.on('close', () => {
+            process.stderr.write('[intandem] Tunnel closed again\n');
+            state.tunnel = null;
+          });
+        })
+        .catch(() => {
+          process.stderr.write('[intandem] Tunnel reopen failed — local-only mode\n');
+        });
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -129,6 +220,7 @@ async function handleCreate(
     username: state.myUsername,
     workspaceName: name,
     isCreator: true,
+    maxPeers,
   });
 
   const ok = await conn.connect(`ws://127.0.0.1:${port}`, token, state.myUsername);
@@ -317,8 +409,13 @@ function handlePlan(args: Record<string, unknown>, conn: HubConnection, state: C
 
 function handlePeers(conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
-  if (state.currentPeers.length === 0) return text('No other peers online.');
-  return text(`Online peers: ${state.currentPeers.join(', ')}`);
+  const healthMs = conn.lastHealthPing;
+  const health = healthMs < 0 ? 'unknown' : healthMs < 60_000 ? 'good' : 'degraded';
+  const lines = [
+    `Online peers: ${state.currentPeers.length > 0 ? state.currentPeers.join(', ') : 'none'}`,
+    `Connection health: ${health}`,
+  ];
+  return text(lines.join('\n'));
 }
 
 function handleLeave(conn: HubConnection, state: ChannelState): ToolResult {
