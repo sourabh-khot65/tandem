@@ -5,3 +5,5 @@ tsconfig.json
 *.ts
 *.tgz
 !dist/**
+!.claude-plugin/**
+!plugin/**

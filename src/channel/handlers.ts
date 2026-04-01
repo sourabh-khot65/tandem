@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { TandemHub } from '../hub/server.js';
-import { decodeJoinCode, createJoinCode } from '../shared/crypto.js';
+import { decodeJoinCode, createJoinCode, generateInviteCode, encryptMessage, signMessage } from '../shared/crypto.js';
 import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
   clearWorkspaceConfig,
   findLocalHubConfig,
 } from '../shared/config.js';
-import type { PeerMessage, MessageType, TaskItem } from '../shared/types.js';
+import type { PeerMessage, MessageType, TaskItem, CodeReference } from '../shared/types.js';
 import type { Tunnel } from 'localtunnel';
 import localtunnel from 'localtunnel';
 import { HubConnection } from './connection.js';
@@ -25,6 +26,8 @@ export interface ChannelState {
   currentPeers: string[];
   workspaceName: string;
   myUsername: string;
+  workspaceToken: string; // for E2E encryption
+  inviteCode: string; // short human-readable invite code
   pendingBoardResolve: ((tasks: TaskItem[]) => void) | null;
 }
 
@@ -140,6 +143,8 @@ export async function handleToolCall(
       return handleUpdateTask(args, conn, state);
     case 'intandem_plan':
       return handlePlan(args, conn, state);
+    case 'intandem_share':
+      return handleShare(args, conn, state);
     case 'intandem_peers':
       return handlePeers(conn, state);
     case 'intandem_leave':
@@ -223,23 +228,31 @@ async function handleCreate(
     maxPeers,
   });
 
+  state.workspaceToken = token;
+  state.inviteCode = generateInviteCode();
+
   const ok = await conn.connect(`ws://127.0.0.1:${port}`, token, state.myUsername);
   if (!ok) {
     return text('Failed to connect to hub. Something went wrong.');
   }
 
+  // Register the short invite code with the hub
+  conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
+
   const lines = [
     `Workspace "${name}" created!`,
     `Your username: ${state.myUsername}`,
     ``,
-    `Share this join code with your teammates:`,
+    `Invite code: ${state.inviteCode}`,
     ``,
+    `Share this with your teammates. They paste it into their Claude session:`,
+    `"Join intandem workspace: ${state.inviteCode}"`,
+    ``,
+    `Full join code (for remote/cross-machine):`,
     `${joinCode}`,
     ``,
-    `They paste it into their Claude session:`,
-    `"Join this intandem workspace: <code>"`,
-    ``,
     tunnelUrl ? `Tunnel: ${tunnelUrl} (works across machines/networks)` : `Local only: ws://127.0.0.1:${port}`,
+    `Messages are end-to-end encrypted.`,
     `Waiting for peers... (0/${maxPeers} slots)`,
   ];
   return text(lines.join('\n'));
@@ -277,6 +290,8 @@ async function handleJoin(
     return text('Invalid join code. Check with the workspace creator.');
   }
 
+  state.workspaceToken = decoded.token;
+
   const isLocal = decoded.hubUrl.includes('127.0.0.1') || decoded.hubUrl.includes('localhost');
   saveWorkspaceConfig({
     hubUrl: decoded.hubUrl,
@@ -297,6 +312,26 @@ async function handleJoin(
   );
 }
 
+function buildSignedMessage(
+  state: ChannelState,
+  opts: { type: MessageType; to?: string; content: string; refs?: CodeReference[] },
+): PeerMessage {
+  const content = state.workspaceToken ? encryptMessage(opts.content, state.workspaceToken) : opts.content;
+  const payload: PeerMessage = {
+    type: opts.type,
+    from: state.myUsername,
+    to: opts.to,
+    content,
+    timestamp: Date.now(),
+    refs: opts.refs,
+    encrypted: !!state.workspaceToken,
+  };
+  if (state.workspaceToken) {
+    payload.signature = signMessage(`${payload.from}:${payload.timestamp}:${payload.content}`, state.workspaceToken);
+  }
+  return payload;
+}
+
 function handleSend(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
 
@@ -304,13 +339,11 @@ function handleSend(args: Record<string, unknown>, conn: HubConnection, state: C
   if (!VALID_TYPES.includes(msgType)) {
     return text(`Invalid type. Use: ${VALID_TYPES.join(', ')}`);
   }
-  const payload: PeerMessage = {
+  const payload = buildSignedMessage(state, {
     type: msgType,
-    from: state.myUsername,
     to: args.to as string | undefined,
     content: args.message as string,
-    timestamp: Date.now(),
-  };
+  });
   conn.send({ kind: 'message', payload });
   const target = args.to ? `to ${args.to}` : 'to all peers';
   return text(`Sent ${msgType} ${target}: "${args.message}"`);
@@ -394,17 +427,55 @@ function handlePlan(args: Record<string, unknown>, conn: HubConnection, state: C
   }
 
   const planSummary = created.join('\n');
-  conn.send({
-    kind: 'message',
-    payload: {
-      type: 'task',
-      from: state.myUsername,
-      content: `Created work plan with ${created.length} tasks:\n${planSummary}`,
-      timestamp: Date.now(),
-    },
+  const planPayload = buildSignedMessage(state, {
+    type: 'task',
+    content: `Created work plan with ${created.length} tasks:\n${planSummary}`,
   });
+  conn.send({ kind: 'message', payload: planPayload });
 
   return text(`Plan created with ${created.length} tasks:\n${planSummary}`);
+}
+
+function handleShare(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+
+  const file = args.file as string;
+  if (!file) return text('Specify a file path to share.');
+
+  const startLine = args.start_line as number | undefined;
+  const endLine = args.end_line as number | undefined;
+  const message = (args.message as string) ?? '';
+
+  // Read the file snippet
+  let snippet: string | undefined;
+  try {
+    const content = readFileSync(file, 'utf-8');
+    const lines = content.split('\n');
+    const start = Math.max(0, (startLine ?? 1) - 1);
+    const end = Math.min(lines.length, endLine ?? start + 20);
+    snippet = lines.slice(start, end).join('\n');
+  } catch {
+    snippet = undefined;
+  }
+
+  const ref: CodeReference = {
+    file,
+    startLine,
+    endLine,
+    snippet,
+    language: file.split('.').pop(),
+  };
+
+  const content = message || `Sharing ${file}${startLine ? `:${startLine}` : ''}${endLine ? `-${endLine}` : ''}`;
+  const payload = buildSignedMessage(state, {
+    type: 'context',
+    to: args.to as string | undefined,
+    content,
+    refs: [ref],
+  });
+  conn.send({ kind: 'message', payload });
+  const target = args.to ? `to ${args.to}` : 'to all peers';
+  return text(`Shared ${file}${startLine ? `:${startLine}-${endLine ?? ''}` : ''} ${target}`);
 }
 
 function handlePeers(conn: HubConnection, state: ChannelState): ToolResult {
@@ -466,6 +537,12 @@ async function handleRejoin(conn: HubConnection, state: ChannelState): Promise<T
       if (creatorConfig.token) config = creatorConfig;
     }
   }
+
+  if (!config.token) {
+    return text('Saved workspace config has no token. Use intandem_join with a fresh join code.');
+  }
+
+  state.workspaceToken = config.token;
 
   let ok = false;
   for (const url of urlsToTry) {

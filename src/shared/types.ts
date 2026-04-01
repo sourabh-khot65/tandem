@@ -1,5 +1,13 @@
 // Message types flowing between peers through the hub
-export type MessageType = 'finding' | 'task' | 'question' | 'status' | 'handoff' | 'review' | 'chat';
+export type MessageType = 'finding' | 'task' | 'question' | 'status' | 'handoff' | 'review' | 'chat' | 'context';
+
+export interface CodeReference {
+  file: string;
+  startLine?: number;
+  endLine?: number;
+  snippet?: string; // code excerpt
+  language?: string;
+}
 
 export interface PeerMessage {
   type: MessageType;
@@ -7,6 +15,9 @@ export interface PeerMessage {
   to?: string; // specific peer, or undefined for broadcast
   content: string;
   timestamp: number;
+  refs?: CodeReference[]; // structured code context attached to message
+  encrypted?: boolean; // true if content is E2E encrypted
+  signature?: string; // HMAC signature for sender verification
 }
 
 // Hub protocol messages (WebSocket frames)
@@ -21,6 +32,10 @@ export type HubMessage =
   | { kind: 'board_update'; task: TaskItem }
   | { kind: 'board_reject'; taskId: string; reason: string }
   | { kind: 'peers'; list: PeerInfo[] }
+  | { kind: 'invite_register'; inviteCode: string } // register short invite code with hub
+  | { kind: 'invite_resolve'; inviteCode: string } // client asks hub to resolve a short code
+  | { kind: 'invite_result'; hubUrl: string; workspaceId: string; token: string } // hub responds
+  | { kind: 'invite_fail'; reason: string }
   | { kind: 'error'; message: string };
 
 export interface WorkspaceInfo {
@@ -28,11 +43,13 @@ export interface WorkspaceInfo {
   id: string;
   peers: string[];
   maxPeers: number;
+  inviteCode?: string; // short human-readable invite code
 }
 
 export interface PeerInfo {
   username: string;
   connectedAt: number;
+  workingOn?: string; // what file/task they're focused on
 }
 
 export interface TaskItem {
@@ -55,5 +72,6 @@ export interface WorkspaceConfig {
   username: string;
   workspaceName: string;
   isCreator?: boolean;
-  maxPeers?: number; // needed for hub adoption
+  maxPeers?: number;
+  inviteCode?: string; // short invite code for easy sharing
 }

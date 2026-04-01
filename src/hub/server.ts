@@ -4,7 +4,16 @@ import { TandemDB } from './db.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
 import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType } from '../shared/types.js';
 
-const VALID_MESSAGE_TYPES: MessageType[] = ['finding', 'task', 'question', 'status', 'handoff', 'review', 'chat'];
+const VALID_MESSAGE_TYPES: MessageType[] = [
+  'finding',
+  'task',
+  'question',
+  'status',
+  'handoff',
+  'review',
+  'chat',
+  'context',
+];
 const VALID_TASK_STATUSES: TaskItem['status'][] = ['open', 'claimed', 'in_progress', 'done'];
 
 interface ConnectedPeer {
@@ -22,8 +31,9 @@ interface Workspace {
   name: string;
   token: string;
   maxPeers: number;
+  inviteCode?: string; // short human-readable code
   peers: Map<string, ConnectedPeer>;
-  knownSessions: Set<string>; // sessionIds that have connected before (skip replay on reconnect)
+  knownSessions: Set<string>;
   db: TandemDB;
 }
 
@@ -35,6 +45,7 @@ export interface HubOptions {
 export class TandemHub {
   private wss: WebSocketServer | null = null;
   private workspaces = new Map<string, Workspace>();
+  private inviteCodes = new Map<string, Workspace>();
   private rateLimitWindow = 60_000; // 1 minute
   private maxMessagesPerWindow = 30;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -156,6 +167,19 @@ export class TandemHub {
         case 'peers':
           this.sendPeers(ws, workspace);
           break;
+        case 'invite_register':
+          workspace.inviteCode = msg.inviteCode;
+          this.inviteCodes.set(msg.inviteCode, workspace);
+          break;
+        case 'invite_resolve': {
+          const target = this.inviteCodes.get(msg.inviteCode);
+          if (target) {
+            this.send(ws, { kind: 'invite_result', hubUrl: '', workspaceId: target.id, token: target.token });
+          } else {
+            this.send(ws, { kind: 'invite_fail', reason: 'Invalid invite code' });
+          }
+          break;
+        }
       }
     });
 
@@ -255,6 +279,7 @@ export class TandemHub {
         id: targetWorkspace.id,
         peers: Array.from(targetWorkspace.peers.keys()),
         maxPeers: targetWorkspace.maxPeers,
+        inviteCode: targetWorkspace.inviteCode,
       },
     });
 

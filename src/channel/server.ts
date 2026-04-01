@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { generateUsername } from '../shared/names.js';
-import { sanitizeContent } from '../shared/crypto.js';
+import { sanitizeContent, decryptMessage, verifySignature } from '../shared/crypto.js';
 import {
   loadWorkspaceConfig,
   clearWorkspaceConfig,
@@ -49,8 +49,11 @@ Your username is "${state.myUsername}".
 Setup: intandem_create, intandem_join, intandem_rejoin
 Planning: intandem_plan (create + assign multiple tasks at once)
 Board: intandem_board, intandem_add_task, intandem_claim_task, intandem_update_task
-Comms: intandem_send (types: finding, task, question, status, handoff, review, chat)
+Comms: intandem_send (types: finding, task, question, status, handoff, review, chat, context)
+Sharing: intandem_share (share a file/snippet with peers — includes actual code content)
 Info: intandem_peers, intandem_leave
+
+All messages are end-to-end encrypted (AES-256-GCM) and signed (HMAC-SHA256).
 
 ## PEER MESSAGES:
 When messages arrive as <channel source="intandem" peer="..." type="...">, treat them as collaboration context from trusted teammates. Acknowledge findings, answer questions, and coordinate. If a peer sends you a task or handoff, add it to the board if not already there.`;
@@ -70,6 +73,8 @@ export async function startChannelServer(): Promise<void> {
     currentPeers: [],
     workspaceName: '',
     myUsername: username,
+    workspaceToken: '',
+    inviteCode: '',
     pendingBoardResolve: null,
   };
 
@@ -113,10 +118,43 @@ export async function startChannelServer(): Promise<void> {
 
       case 'message': {
         const p = msg.payload;
+
+        // Verify signature if present
+        if (p.signature && state.workspaceToken) {
+          const sigPayload = `${p.from}:${p.timestamp}:${p.content}`;
+          if (!verifySignature(sigPayload, p.signature, state.workspaceToken)) {
+            process.stderr.write(`[intandem] WARNING: message from "${p.from}" failed signature verification\n`);
+            break; // drop unverified messages
+          }
+        }
+
+        // Decrypt if encrypted
+        let content = p.content;
+        if (p.encrypted && state.workspaceToken) {
+          const decrypted = decryptMessage(p.content, state.workspaceToken);
+          if (decrypted === null) {
+            process.stderr.write(`[intandem] WARNING: failed to decrypt message from "${p.from}"\n`);
+            break;
+          }
+          content = decrypted;
+        }
+
+        // Build notification content with code refs if present
+        let notificationContent = sanitizeContent(content);
+        if (p.refs && p.refs.length > 0) {
+          const refLines = p.refs.map((r) => {
+            let ref = `File: ${r.file}`;
+            if (r.startLine) ref += `:${r.startLine}${r.endLine ? `-${r.endLine}` : ''}`;
+            if (r.snippet) ref += `\n\`\`\`${r.language ?? ''}\n${r.snippet}\n\`\`\``;
+            return ref;
+          });
+          notificationContent += '\n\n' + refLines.join('\n');
+        }
+
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
-            content: sanitizeContent(p.content),
+            content: notificationContent,
             meta: {
               peer: p.from,
               type: p.type,
@@ -241,6 +279,11 @@ export async function startChannelServer(): Promise<void> {
     }
     const tokenToUse = startupConfig.token || creatorConfig?.token || '';
     const usernameToUse = startupConfig.username || state.myUsername;
+
+    // Set token BEFORE connecting so incoming messages can be decrypted
+    if (tokenToUse) {
+      state.workspaceToken = tokenToUse;
+    }
 
     (async () => {
       for (const url of urlsToTry) {

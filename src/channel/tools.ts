@@ -1,6 +1,15 @@
 import type { MessageType } from '../shared/types.js';
 
-export const VALID_TYPES: MessageType[] = ['finding', 'task', 'question', 'status', 'handoff', 'review', 'chat'];
+export const VALID_TYPES: MessageType[] = [
+  'finding',
+  'task',
+  'question',
+  'status',
+  'handoff',
+  'review',
+  'chat',
+  'context',
+];
 
 export const TOOL_DEFINITIONS = [
   {
@@ -109,6 +118,22 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['tasks'],
+    },
+  },
+  {
+    name: 'intandem_share',
+    description:
+      'Share a code file or snippet with peers. Includes the actual code content so peers can see exactly what you are looking at.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        file: { type: 'string' as const, description: 'File path to share' },
+        start_line: { type: 'number' as const, description: 'Start line number (optional, defaults to 1)' },
+        end_line: { type: 'number' as const, description: 'End line number (optional, defaults to start+20)' },
+        message: { type: 'string' as const, description: 'Context message explaining what to look at (optional)' },
+        to: { type: 'string' as const, description: 'Specific peer (omit to share with all)' },
+      },
+      required: ['file'],
     },
   },
   {

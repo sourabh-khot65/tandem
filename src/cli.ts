@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { startChannelServer } from './channel/server.js';
 import { generateUsername } from './shared/names.js';
-import { saveUsername, loadUsername } from './shared/config.js';
+import { saveUsername, loadUsername, clearWorkspaceConfig, cleanStaleSessions } from './shared/config.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -115,6 +115,10 @@ switch (command) {
     break;
   case 'channel':
     cmdChannel();
+    break;
+  case 'cleanup':
+    clearWorkspaceConfig();
+    cleanStaleSessions();
     break;
   case 'help':
   case '--help':
