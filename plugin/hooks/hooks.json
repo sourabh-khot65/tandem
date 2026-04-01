@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx intandem cleanup 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

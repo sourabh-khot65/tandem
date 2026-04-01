@@ -1,0 +1,16 @@
+{
+  "name": "intandem",
+  "version": "0.1.0",
+  "description": "Real-time pair programming. Connect up to 5 Claude Code sessions into a shared workspace with task board, message routing, and auto-coordination.",
+  "author": {
+    "name": "sourabh-khot65",
+    "url": "https://github.com/sourabh-khot65/tandem"
+  },
+  "homepage": "https://github.com/sourabh-khot65/tandem",
+  "repository": "https://github.com/sourabh-khot65/tandem",
+  "license": "MIT",
+  "keywords": ["collaboration", "pair-programming", "mcp", "workspace", "real-time", "channels"],
+  "skills": "./plugin/skills/",
+  "hooks": "./plugin/hooks/hooks.json",
+  "mcpServers": "./plugin/.mcp.json"
+}
