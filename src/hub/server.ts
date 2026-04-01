@@ -137,6 +137,17 @@ export class TandemHub {
         return;
       }
 
+      // Allow invite resolution without authentication
+      if (msg.kind === 'invite_resolve') {
+        const target = this.inviteCodes.get(msg.inviteCode);
+        if (target) {
+          this.send(ws, { kind: 'invite_result', hubUrl: '', workspaceId: target.id, token: target.token });
+        } else {
+          this.send(ws, { kind: 'invite_fail', reason: 'Invalid invite code' });
+        }
+        return;
+      }
+
       if (!authenticated) {
         if (msg.kind !== 'auth') {
           this.send(ws, { kind: 'error', message: 'Must authenticate first' });
@@ -171,15 +182,7 @@ export class TandemHub {
           workspace.inviteCode = msg.inviteCode;
           this.inviteCodes.set(msg.inviteCode, workspace);
           break;
-        case 'invite_resolve': {
-          const target = this.inviteCodes.get(msg.inviteCode);
-          if (target) {
-            this.send(ws, { kind: 'invite_result', hubUrl: '', workspaceId: target.id, token: target.token });
-          } else {
-            this.send(ws, { kind: 'invite_fail', reason: 'Invalid invite code' });
-          }
-          break;
-        }
+        // invite_resolve handled pre-auth above
       }
     });
 

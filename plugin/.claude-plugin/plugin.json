@@ -1,0 +1,13 @@
+{
+  "name": "intandem",
+  "description": "Real-time pair programming for Claude Code. Connect up to 5 sessions into a shared workspace with task boards, encrypted messaging, and code sharing.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Sourabh Khot",
+    "url": "https://github.com/ArekSrorth"
+  },
+  "homepage": "https://github.com/ArekSrorth/intandem",
+  "repository": "https://github.com/ArekSrorth/intandem",
+  "license": "MIT",
+  "keywords": ["pair-programming", "collaboration", "mcp", "channels", "real-time", "task-board"]
+}

@@ -26,11 +26,12 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'intandem_join',
-    description: "Join a teammate's workspace using their share code",
+    description:
+      'Join a teammate\'s workspace using their invite code (e.g. "ABC123" for local, "ABC123@host" for remote, or a full join code)',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        code: { type: 'string' as const, description: 'The join code from the workspace creator' },
+        code: { type: 'string' as const, description: 'Short invite code (ABC123 or ABC123@host) or full join code' },
       },
       required: ['code'],
     },

@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import WebSocket from 'ws';
 import { TandemHub } from '../hub/server.js';
-import { decodeJoinCode, createJoinCode, generateInviteCode, encryptMessage, signMessage } from '../shared/crypto.js';
+import { parseInvite, createShortInvite, generateInviteCode, encryptMessage, signMessage } from '../shared/crypto.js';
 import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
@@ -69,10 +70,8 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
     const { port } = await state.hub.start({ port: 0, host: '127.0.0.1' });
 
     // Try to open tunnel for remote peers
-    let publicUrl = `ws://127.0.0.1:${port}`;
     try {
       state.tunnel = await localtunnel({ port });
-      publicUrl = state.tunnel.url.replace('https://', 'wss://').replace('http://', 'ws://');
       process.stderr.write(`[intandem] New tunnel open: ${state.tunnel.url}\n`);
       state.tunnel.on('close', () => {
         process.stderr.write('[intandem] Tunnel closed\n');
@@ -96,9 +95,12 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
 
     const ok = await conn.connect(localUrl, config.token, state.myUsername);
     if (ok) {
-      const joinCode = createJoinCode(publicUrl, config.workspaceId, config.token);
+      state.inviteCode = generateInviteCode();
+      conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
+      const tunnelUrl = state.tunnel?.url;
+      const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
       process.stderr.write(`[intandem] Promoted to hub owner for "${config.workspaceName}"\n`);
-      return { ok: true, joinCode };
+      return { ok: true, joinCode: shortInvite };
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -185,12 +187,10 @@ async function handleCreate(
   const { workspaceId, token } = state.hub.createWorkspace(name, maxPeers);
   const { port } = await state.hub.start({ port: 0, host: '127.0.0.1' });
 
-  let publicUrl = `ws://127.0.0.1:${port}`;
   let tunnelUrl = '';
   try {
     state.tunnel = await localtunnel({ port });
     tunnelUrl = state.tunnel.url;
-    publicUrl = tunnelUrl.replace('https://', 'wss://').replace('http://', 'ws://');
     process.stderr.write(`[intandem] Tunnel open: ${tunnelUrl}\n`);
     state.tunnel.on('close', () => {
       process.stderr.write('[intandem] Tunnel closed — remote peers may lose access. Local connections unaffected.\n');
@@ -212,10 +212,8 @@ async function handleCreate(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[intandem] Tunnel failed (${message}), using local-only mode\n`);
-    publicUrl = `ws://127.0.0.1:${port}`;
   }
 
-  const joinCode = createJoinCode(publicUrl, workspaceId, token);
   const localUrl = `ws://127.0.0.1:${port}`;
   saveWorkspaceConfig({
     hubUrl: localUrl,
@@ -239,23 +237,68 @@ async function handleCreate(
   // Register the short invite code with the hub
   conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
 
+  const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
+
   const lines = [
     `Workspace "${name}" created!`,
     `Your username: ${state.myUsername}`,
     ``,
-    `Invite code: ${state.inviteCode}`,
+    `Share this code with teammates:`,
     ``,
-    `Share this with your teammates. They paste it into their Claude session:`,
-    `"Join intandem workspace: ${state.inviteCode}"`,
+    `  ${shortInvite}`,
     ``,
-    `Full join code (for remote/cross-machine):`,
-    `${joinCode}`,
+    `They just tell their Claude: "Join intandem workspace: ${shortInvite}"`,
     ``,
-    tunnelUrl ? `Tunnel: ${tunnelUrl} (works across machines/networks)` : `Local only: ws://127.0.0.1:${port}`,
     `Messages are end-to-end encrypted.`,
     `Waiting for peers... (0/${maxPeers} slots)`,
   ];
+
   return text(lines.join('\n'));
+}
+
+/**
+ * Resolve a short invite code by connecting to the hub and asking it.
+ * Returns the decoded join info, or null if resolution fails.
+ */
+function resolveShortCode(hubUrl: string, inviteCode: string): Promise<{ workspaceId: string; token: string } | null> {
+  return new Promise((resolve) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(hubUrl);
+    } catch {
+      resolve(null);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      ws.close();
+      resolve(null);
+    }, 5000);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ kind: 'invite_resolve', inviteCode }));
+    });
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        clearTimeout(timeout);
+        if (msg.kind === 'invite_result' && msg.token) {
+          ws.close();
+          resolve({ workspaceId: msg.workspaceId, token: msg.token });
+        } else {
+          ws.close();
+          resolve(null);
+        }
+      } catch {
+        ws.close();
+        resolve(null);
+      }
+    });
+    ws.on('error', () => {
+      clearTimeout(timeout);
+      resolve(null);
+    });
+  });
 }
 
 async function handleJoin(
@@ -285,26 +328,79 @@ async function handleJoin(
     return text('Need a join code. Ask your teammate for it.');
   }
 
-  const decoded = decodeJoinCode(code);
-  if (!decoded) {
-    return text('Invalid join code. Check with the workspace creator.');
+  const invite = parseInvite(code);
+  if (!invite) {
+    return text('Invalid join code. Expected a short code like "ABC123" or "ABC123@host", or a full join code.');
   }
 
-  state.workspaceToken = decoded.token;
+  let hubUrl: string;
+  let workspaceId: string;
+  let token: string;
 
-  const isLocal = decoded.hubUrl.includes('127.0.0.1') || decoded.hubUrl.includes('localhost');
+  if (invite.type === 'full') {
+    // Full base64url join code — use directly
+    hubUrl = invite.hubUrl;
+    workspaceId = invite.workspaceId;
+    token = invite.token;
+  } else {
+    // Short invite code — need to resolve via hub
+    const hubUrls: string[] = [];
+
+    if (invite.host) {
+      // Has routing hint: "ABC123@host" — try wss first, then ws
+      hubUrls.push(`wss://${invite.host}`, `ws://${invite.host}`);
+    }
+
+    // Also try local hub discovery
+    const localConfig = findLocalHubConfig();
+    if (localConfig?.localUrl) {
+      hubUrls.push(localConfig.localUrl);
+    }
+
+    if (hubUrls.length === 0) {
+      return text(
+        `Short code "${invite.code}" needs a hub to resolve against. ` +
+          `Use the full format "ABC123@host" or paste the full join code from the workspace creator.`,
+      );
+    }
+
+    let resolved: { workspaceId: string; token: string } | null = null;
+    for (const url of hubUrls) {
+      process.stderr.write(`[intandem] Resolving invite code ${invite.code} via ${url}...\n`);
+      resolved = await resolveShortCode(url, invite.code);
+      if (resolved) {
+        hubUrl = url;
+        break;
+      }
+    }
+
+    if (!resolved) {
+      return text(
+        `Could not resolve invite code "${invite.code}". ` +
+          `The workspace may be offline. Ask your teammate for a fresh code.`,
+      );
+    }
+
+    hubUrl = hubUrl!;
+    workspaceId = resolved.workspaceId;
+    token = resolved.token;
+  }
+
+  state.workspaceToken = token;
+
+  const isLocal = hubUrl.includes('127.0.0.1') || hubUrl.includes('localhost');
   saveWorkspaceConfig({
-    hubUrl: decoded.hubUrl,
-    localUrl: isLocal ? decoded.hubUrl : undefined,
-    workspaceId: decoded.workspaceId,
-    token: decoded.token,
+    hubUrl,
+    localUrl: isLocal ? hubUrl : undefined,
+    workspaceId,
+    token,
     username: state.myUsername,
     workspaceName: 'intandem-session',
   });
 
-  const ok = await conn.connect(decoded.hubUrl, decoded.token, state.myUsername);
+  const ok = await conn.connect(hubUrl, token, state.myUsername);
   if (!ok) {
-    return text(`Failed to connect to hub at ${decoded.hubUrl}. Is the workspace still running?`);
+    return text(`Failed to connect to hub at ${hubUrl}. Is the workspace still running?`);
   }
 
   return text(

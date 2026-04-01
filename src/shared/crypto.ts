@@ -28,24 +28,67 @@ export function generateInviteCode(): string {
     .join('');
 }
 
-// --- Join codes (backward compat: full base64url encoding) ---
+// --- Join codes ---
 
+/** Full join code: base64url-encoded JSON with hub URL, workspace ID, and token */
 export function createJoinCode(hubUrl: string, workspaceId: string, token: string): string {
   const payload = JSON.stringify({ h: hubUrl, w: workspaceId, t: token });
   return Buffer.from(payload).toString('base64url');
 }
 
-export function decodeJoinCode(code: string): { hubUrl: string; workspaceId: string; token: string } | null {
+/**
+ * Create a short invite code with optional routing hint.
+ * Format: "ABCD12" (local only) or "ABCD12@host" (remote via tunnel)
+ */
+export function createShortInvite(code: string, tunnelUrl?: string): string {
+  if (!tunnelUrl) return code;
   try {
-    const json = Buffer.from(code, 'base64url').toString('utf-8');
+    const url = new URL(tunnelUrl);
+    return `${code}@${url.host}`;
+  } catch {
+    return code;
+  }
+}
+
+/**
+ * Parse an invite string. Returns one of:
+ * - { type: 'full', hubUrl, workspaceId, token } for base64url join codes
+ * - { type: 'short', code, host? } for short invite codes (with optional routing host)
+ */
+export function parseInvite(
+  input: string,
+):
+  | { type: 'full'; hubUrl: string; workspaceId: string; token: string }
+  | { type: 'short'; code: string; host?: string }
+  | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Try short code format first: "ABCD12" or "ABCD12@host"
+  const shortMatch = trimmed.match(/^([A-Z2-9]{6})(?:@(.+))?$/i);
+  if (shortMatch) {
+    return { type: 'short', code: shortMatch[1].toUpperCase(), host: shortMatch[2] };
+  }
+
+  // Try full base64url join code
+  try {
+    const json = Buffer.from(trimmed, 'base64url').toString('utf-8');
     const parsed = JSON.parse(json);
     if (parsed.h && parsed.w && parsed.t) {
-      return { hubUrl: parsed.h, workspaceId: parsed.w, token: parsed.t };
+      return { type: 'full', hubUrl: parsed.h, workspaceId: parsed.w, token: parsed.t };
     }
-    return null;
   } catch {
-    return null;
+    // not a valid base64url code
   }
+
+  return null;
+}
+
+/** @deprecated Use parseInvite instead */
+export function decodeJoinCode(code: string): { hubUrl: string; workspaceId: string; token: string } | null {
+  const result = parseInvite(code);
+  if (result?.type === 'full') return { hubUrl: result.hubUrl, workspaceId: result.workspaceId, token: result.token };
+  return null;
 }
 
 // --- E2E Encryption (AES-256-GCM) ---
