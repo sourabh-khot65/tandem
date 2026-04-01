@@ -1,4 +1,4 @@
-import { randomBytes, createCipheriv, createDecipheriv, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createCipheriv, createDecipheriv, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
 // --- IDs and tokens ---
 
@@ -91,16 +91,25 @@ export function decodeJoinCode(code: string): { hubUrl: string; workspaceId: str
   return null;
 }
 
-// --- E2E Encryption (AES-256-GCM) ---
+// --- Key Derivation (HKDF per RFC 5869) ---
 
-/** Derive a 256-bit encryption key from the workspace token */
-function deriveKey(token: string): Buffer {
-  return createHmac('sha256', 'intandem-e2e-v1').update(token).digest();
+const HKDF_SALT = Buffer.from('intandem-e2e-v2', 'utf-8');
+
+/** Derive a 256-bit encryption key from the workspace token (C2 fix: HKDF with domain separation) */
+function deriveEncKey(token: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', token, HKDF_SALT, 'intandem-enc', 32));
 }
+
+/** Derive a 256-bit signing key from the workspace token (C2 fix: separate from encryption key) */
+function deriveSignKey(token: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', token, HKDF_SALT, 'intandem-sign', 32));
+}
+
+// --- E2E Encryption (AES-256-GCM) ---
 
 /** Encrypt a message using AES-256-GCM. Returns base64url string: iv.ciphertext.tag */
 export function encryptMessage(plaintext: string, token: string): string {
-  const key = deriveKey(token);
+  const key = deriveEncKey(token);
   const iv = randomBytes(12); // 96-bit nonce for GCM
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
@@ -113,7 +122,7 @@ export function decryptMessage(ciphertext: string, token: string): string | null
   try {
     const parts = ciphertext.split('.');
     if (parts.length !== 3) return null;
-    const key = deriveKey(token);
+    const key = deriveEncKey(token);
     const iv = Buffer.from(parts[0], 'base64url');
     const encrypted = Buffer.from(parts[1], 'base64url');
     const tag = Buffer.from(parts[2], 'base64url');
@@ -126,11 +135,12 @@ export function decryptMessage(ciphertext: string, token: string): string | null
   }
 }
 
-// --- Message signing (HMAC-SHA256) ---
+// --- Message signing (HMAC-SHA256 with derived key) ---
 
-/** Sign a message payload with HMAC-SHA256 using the workspace token */
+/** Sign a message payload with HMAC-SHA256 using a derived signing key (C2 fix: separate from encryption) */
 export function signMessage(payload: string, token: string): string {
-  return createHmac('sha256', token).update(payload).digest('base64url');
+  const key = deriveSignKey(token);
+  return createHmac('sha256', key).update(payload).digest('base64url');
 }
 
 /** Verify a message signature (constant-time comparison) */

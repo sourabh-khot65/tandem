@@ -42,10 +42,23 @@ export interface HubOptions {
   host?: string;
 }
 
+// One-time auth tickets for invite code resolution (C1 fix)
+interface AuthTicket {
+  token: string;
+  workspaceId: string;
+  createdAt: number;
+}
+
+const TICKET_TTL_MS = 30_000; // tickets expire after 30 seconds
+const MAX_INVITE_ATTEMPTS_PER_MIN = 5;
+const MAX_WS_PAYLOAD = 64 * 1024; // 64KB max WebSocket message (H4 fix)
+
 export class TandemHub {
   private wss: WebSocketServer | null = null;
   private workspaces = new Map<string, Workspace>();
   private inviteCodes = new Map<string, Workspace>();
+  private authTickets = new Map<string, AuthTicket>(); // ticket → auth info
+  private inviteAttempts = new Map<string, { count: number; resetAt: number }>(); // IP → attempts
   private rateLimitWindow = 60_000; // 1 minute
   private maxMessagesPerWindow = 30;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
@@ -88,6 +101,7 @@ export class TandemHub {
       this.wss = new WebSocketServer({
         port: options.port,
         host: options.host ?? '127.0.0.1',
+        maxPayload: MAX_WS_PAYLOAD,
       });
 
       this.wss.on('listening', () => {
@@ -137,11 +151,37 @@ export class TandemHub {
         return;
       }
 
-      // Allow invite resolution without authentication
+      // Allow invite resolution without authentication — returns a one-time ticket, NOT the token (C1 fix)
       if (msg.kind === 'invite_resolve') {
+        // Rate limit per remote address
+        const remoteAddr =
+          (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress ?? 'unknown';
+        const now = Date.now();
+        const attempts = this.inviteAttempts.get(remoteAddr);
+        if (attempts) {
+          if (now > attempts.resetAt) {
+            attempts.count = 0;
+            attempts.resetAt = now + 60_000;
+          }
+          if (attempts.count >= MAX_INVITE_ATTEMPTS_PER_MIN) {
+            this.send(ws, { kind: 'invite_fail', reason: 'Too many attempts. Try again later.' });
+            return;
+          }
+          attempts.count++;
+        } else {
+          this.inviteAttempts.set(remoteAddr, { count: 1, resetAt: now + 60_000 });
+        }
+
         const target = this.inviteCodes.get(msg.inviteCode);
         if (target) {
-          this.send(ws, { kind: 'invite_result', hubUrl: '', workspaceId: target.id, token: target.token });
+          // Generate a one-time ticket instead of returning raw token
+          const ticket = randomBytes(16).toString('base64url');
+          this.authTickets.set(ticket, { token: target.token, workspaceId: target.id, createdAt: now });
+          // Clean expired tickets
+          for (const [t, info] of this.authTickets) {
+            if (now - info.createdAt > TICKET_TTL_MS) this.authTickets.delete(t);
+          }
+          this.send(ws, { kind: 'invite_result', hubUrl: '', workspaceId: target.id, token: ticket });
         } else {
           this.send(ws, { kind: 'invite_fail', reason: 'Invalid invite code' });
         }
@@ -212,10 +252,24 @@ export class TandemHub {
     msg: Extract<HubMessage, { kind: 'auth' }>,
     onSuccess: (workspace: Workspace, username: string) => void,
   ): void {
+    // Resolve auth ticket to real token if applicable (C1 fix)
+    let authToken = msg.token;
+    const ticket = this.authTickets.get(msg.token);
+    if (ticket) {
+      const now = Date.now();
+      this.authTickets.delete(msg.token); // one-time use
+      if (now - ticket.createdAt > TICKET_TTL_MS) {
+        this.send(ws, { kind: 'auth_fail', reason: 'Ticket expired. Request a new invite code.' });
+        ws.close();
+        return;
+      }
+      authToken = ticket.token;
+    }
+
     // Find workspace by token
     let targetWorkspace: Workspace | null = null;
     for (const w of this.workspaces.values()) {
-      if (w.token === msg.token) {
+      if (w.token === authToken) {
         targetWorkspace = w;
         break;
       }
@@ -329,6 +383,9 @@ export class TandemHub {
     const peer = workspace.peers.get(from);
     if (!peer) return;
 
+    // H1 fix: enforce sender identity — hub overwrites from field with authenticated username
+    payload.from = from;
+
     // Rate limiting
     peer.messageCount++;
     if (peer.messageCount > this.maxMessagesPerWindow) {
@@ -336,6 +393,13 @@ export class TandemHub {
       return;
     }
     peer.lastMessageAt = Date.now();
+
+    // H2 fix: reject messages with stale timestamps (replay protection)
+    const now = Date.now();
+    if (Math.abs(now - payload.timestamp) > 120_000) {
+      this.send(peer.ws, { kind: 'error', message: 'Message timestamp too old or in the future. Rejected.' });
+      return;
+    }
 
     // Log to DB
     workspace.db.logMessage({
@@ -365,8 +429,32 @@ export class TandemHub {
       this.send(ws, { kind: 'error', message: `Invalid task status: ${task.status}` });
       return;
     }
+
+    // H5 fix: validate field lengths to prevent DoS
+    if (task.title && task.title.length > 500) {
+      this.send(ws, { kind: 'error', message: 'Task title too long (max 500 chars)' });
+      return;
+    }
+    if (task.description && task.description.length > 2000) {
+      this.send(ws, { kind: 'error', message: 'Task description too long (max 2000 chars)' });
+      return;
+    }
+
     const existing = workspace.db.getTask(task.id);
     if (existing) {
+      // H5 fix: only creator or assignee can mutate a task (or anyone can claim an open/unassigned task)
+      const isCreator = existing.createdBy === from;
+      const isAssignee = existing.assignee === from;
+      const isClaimingOpen = task.status === 'claimed' && (!existing.assignee || existing.status === 'open');
+      if (!isCreator && !isAssignee && !isClaimingOpen) {
+        this.send(ws, {
+          kind: 'board_reject',
+          taskId: task.id,
+          reason: `Only the creator or assignee can modify task "${existing.title}"`,
+        });
+        return;
+      }
+
       // Reject claim if task is already taken by someone else
       if (
         task.status === 'claimed' &&
@@ -395,6 +483,8 @@ export class TandemHub {
         this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated });
       }
     } else {
+      // H5 fix: enforce createdBy on new tasks
+      task.createdBy = from;
       workspace.db.createTask(task);
       this.broadcastToWorkspace(workspace, { kind: 'board_update', task });
     }

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import WebSocket from 'ws';
 import { TandemHub } from '../hub/server.js';
 import { parseInvite, createShortInvite, generateInviteCode, encryptMessage, signMessage } from '../shared/crypto.js';
@@ -538,6 +539,19 @@ function handleShare(args: Record<string, unknown>, conn: HubConnection, state: 
   const file = args.file as string;
   if (!file) return text('Specify a file path to share.');
 
+  // C3 fix: validate file path is under cwd to prevent path traversal
+  const cwd = process.cwd();
+  const resolved = resolve(cwd, file);
+  let realPath: string;
+  try {
+    realPath = realpathSync(resolved);
+  } catch {
+    return text(`File not found: ${file}`);
+  }
+  if (!realPath.startsWith(cwd)) {
+    return text(`Access denied: file must be within the project directory.`);
+  }
+
   const startLine = args.start_line as number | undefined;
   const endLine = args.end_line as number | undefined;
   const message = (args.message as string) ?? '';
@@ -545,7 +559,7 @@ function handleShare(args: Record<string, unknown>, conn: HubConnection, state: 
   // Read the file snippet
   let snippet: string | undefined;
   try {
-    const content = readFileSync(file, 'utf-8');
+    const content = readFileSync(realPath, 'utf-8');
     const lines = content.split('\n');
     const start = Math.max(0, (startLine ?? 1) - 1);
     const end = Math.min(lines.length, endLine ?? start + 20);

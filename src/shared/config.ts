@@ -9,10 +9,10 @@ const USERNAME_FILE = join(CONFIG_DIR, 'username');
 
 export function ensureConfigDir(): void {
   if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
   if (!existsSync(SESSIONS_DIR)) {
-    mkdirSync(SESSIONS_DIR, { recursive: true });
+    mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
   }
 }
 
@@ -23,9 +23,9 @@ function sessionFile(pid?: number): string {
 
 export function saveWorkspaceConfig(config: WorkspaceConfig): void {
   ensureConfigDir();
-  writeFileSync(sessionFile(), JSON.stringify(config, null, 2));
-  // Also write a "latest" pointer for backwards compat / manual rejoin
-  writeFileSync(join(CONFIG_DIR, 'config.json'), JSON.stringify(config, null, 2));
+  // H3 fix: restrict file permissions — token-containing files must not be world-readable
+  writeFileSync(sessionFile(), JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeFileSync(join(CONFIG_DIR, 'config.json'), JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 export function loadWorkspaceConfig(): WorkspaceConfig | null {
