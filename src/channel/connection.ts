@@ -178,6 +178,10 @@ export class HubConnection {
 
   private startPing(): void {
     this.stopPing();
+    // Ping immediately so health is available right away
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.ping();
+    }
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.ping();

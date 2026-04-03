@@ -164,29 +164,17 @@ describe('HubConnection', () => {
       expect(conn.lastHealthPing).toBe(-1);
     });
 
-    it('updates lastHealthPing after server pong', async () => {
+    it('has health available immediately after connect (immediate ping)', async () => {
       server = await createServer();
       setupAutoAuth(server.wss);
-
-      // Server pings clients, which triggers pong → client pong handler
-      server.wss.on('connection', (ws) => {
-        setTimeout(() => ws.ping(), 100);
-      });
 
       const conn = new HubConnection(() => {});
       await conn.connect(server.url, 'valid-token', 'User');
 
-      // Wait for client ping (25s interval) is too long — but server ping triggers pong event on client
-      // Actually, the client sends pings and server auto-responds with pong
-      // The client's ws.on('pong') fires when the server responds to client's ping
-      // Client pings every 25s — too long for test. Instead verify the lastPongAt via server ping
-
-      // Wait for server ping to arrive
+      // startPing sends an immediate ping on connect, server auto-responds with pong
       await new Promise((r) => setTimeout(r, 200));
-      // The ws library auto-responds to pings with pongs, so client won't get a 'pong' event
-      // from server's ping. The pong event only fires when CLIENT sends a ping.
-      // Our client pings every 25s which is too long. Let's just verify the property works.
-      expect(conn.lastHealthPing).toBe(-1); // no client-initiated ping/pong yet
+      expect(conn.lastHealthPing).toBeGreaterThanOrEqual(0);
+      expect(conn.lastHealthPing).toBeLessThan(5000);
       conn.disconnect();
     });
   });
