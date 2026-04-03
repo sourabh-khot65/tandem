@@ -431,15 +431,19 @@ export class TandemHub {
       return;
     }
 
-    // Log activity and message to DB
-    workspace.db.logActivity(from, 'message', `${payload.type}${payload.to ? ` → ${payload.to}` : ' (broadcast)'}`);
-    workspace.db.logMessage({
-      type: payload.type,
-      from: payload.from,
-      to: payload.to,
-      content: payload.content,
-      timestamp: payload.timestamp,
-    });
+    // Log activity and message to DB (may fail during shutdown)
+    try {
+      workspace.db.logActivity(from, 'message', `${payload.type}${payload.to ? ` → ${payload.to}` : ' (broadcast)'}`);
+      workspace.db.logMessage({
+        type: payload.type,
+        from: payload.from,
+        to: payload.to,
+        content: payload.content,
+        timestamp: payload.timestamp,
+      });
+    } catch {
+      // DB closed during shutdown
+    }
 
     // Route: specific peer or broadcast
     const deliveredTo: string[] = [];
@@ -468,6 +472,15 @@ export class TandemHub {
   }
 
   private handleBoardUpdate(ws: WebSocket, workspace: Workspace, from: string, task: TaskItem): void {
+    try {
+      this._handleBoardUpdate(ws, workspace, from, task);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return; // DB closed during shutdown
+      throw err;
+    }
+  }
+
+  private _handleBoardUpdate(ws: WebSocket, workspace: Workspace, from: string, task: TaskItem): void {
     if (!VALID_TASK_STATUSES.includes(task.status)) {
       this.send(ws, { kind: 'error', message: `Invalid task status: ${task.status}` });
       return;
@@ -607,6 +620,15 @@ export class TandemHub {
   }
 
   private handleVarSet(ws: WebSocket, workspace: Workspace, from: string, key: string, value: string): void {
+    try {
+      this._handleVarSet(ws, workspace, from, key, value);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private _handleVarSet(ws: WebSocket, workspace: Workspace, from: string, key: string, value: string): void {
     if (key.length > 100) {
       this.send(ws, { kind: 'error', message: 'Variable key too long (max 100 chars)' });
       return;
