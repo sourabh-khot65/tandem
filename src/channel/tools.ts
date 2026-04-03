@@ -66,6 +66,17 @@ export const TOOL_DEFINITIONS = [
       properties: {
         title: { type: 'string' as const, description: 'Task title' },
         description: { type: 'string' as const, description: 'Task description' },
+        priority: {
+          type: 'string' as const,
+          enum: ['critical', 'high', 'medium', 'low'],
+          description: 'Task priority (default: medium)',
+        },
+        depends_on: {
+          type: 'array' as const,
+          items: { type: 'string' as const },
+          description:
+            'Task IDs that must complete before this task can start. Task will be created as "blocked" until all dependencies are done.',
+        },
       },
       required: ['title'],
     },
@@ -82,6 +93,17 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'intandem_unclaim_task',
+    description: 'Release a claimed task back to open status so another peer can pick it up',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        task_id: { type: 'string' as const, description: 'The task ID to release' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
     name: 'intandem_update_task',
     description: 'Update a task status on the shared board',
     inputSchema: {
@@ -90,7 +112,7 @@ export const TOOL_DEFINITIONS = [
         task_id: { type: 'string' as const, description: 'The task ID' },
         status: {
           type: 'string' as const,
-          enum: ['open', 'claimed', 'in_progress', 'done'],
+          enum: ['open', 'blocked', 'claimed', 'in_progress', 'done'],
           description: 'New status',
         },
       },
@@ -113,6 +135,16 @@ export const TOOL_DEFINITIONS = [
               title: { type: 'string' as const, description: 'Task title' },
               description: { type: 'string' as const, description: 'Task description' },
               assignee: { type: 'string' as const, description: 'Username to assign to (optional)' },
+              priority: {
+                type: 'string' as const,
+                enum: ['critical', 'high', 'medium', 'low'],
+                description: 'Task priority (default: medium)',
+              },
+              depends_on: {
+                type: 'array' as const,
+                items: { type: 'string' as const },
+                description: 'Task IDs this depends on (use IDs from earlier tasks in this plan)',
+              },
             },
             required: ['title'],
           },
@@ -138,9 +170,47 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'intandem_set_var',
+    description:
+      'Set a shared workspace variable. Use this to share discovered config, context, or state that all peers need (e.g., datasource UIDs, API endpoints, time ranges).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        key: { type: 'string' as const, description: 'Variable name (e.g., "grafana_uid", "time_range")' },
+        value: { type: 'string' as const, description: 'Variable value' },
+      },
+      required: ['key', 'value'],
+    },
+  },
+  {
+    name: 'intandem_get_var',
+    description: 'Get a shared workspace variable. Use key "*" to list all variables.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        key: {
+          type: 'string' as const,
+          description: 'Variable name to look up, or "*" to list all',
+        },
+      },
+      required: ['key'],
+    },
+  },
+  {
     name: 'intandem_peers',
     description: 'See who is online in the workspace',
     inputSchema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'intandem_activity_log',
+    description:
+      'View the workspace activity log — timestamped history of joins, leaves, task changes, messages, and other events',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        limit: { type: 'number' as const, description: 'Number of entries to show (default: 30)' },
+      },
+    },
   },
   {
     name: 'intandem_leave',

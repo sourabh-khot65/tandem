@@ -9,6 +9,7 @@ const CONNECT_TIMEOUT = 10_000;
 export class HubConnection {
   private ws: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
   private generation = 0;
   private _intentionalLeave = false;
@@ -134,6 +135,7 @@ export class HubConnection {
           this.reconnectAttempts = 0;
           if (adopt()) {
             this.connected = true;
+            this.startPing();
             this.onMessage(msg);
             done(true);
           } else {
@@ -174,7 +176,24 @@ export class HubConnection {
     });
   }
 
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.ping();
+      }
+    }, 25_000);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   disconnect(): void {
+    this.stopPing();
     this.ws?.close();
     this.ws = null;
     this.connected = false;

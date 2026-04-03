@@ -22,6 +22,17 @@ function text(t: string): ToolResult {
   return { content: [{ type: 'text' as const, text: t }] };
 }
 
+export interface SessionStats {
+  connectedAt: number;
+  toolCallCount: number;
+  intandemToolCallCount: number;
+  messagesSent: number;
+  messagesReceived: number;
+  tasksClaimed: number;
+  tasksCompleted: number;
+  peersSeenCount: number;
+}
+
 export interface ChannelState {
   hub: TandemHub | null;
   tunnel: Tunnel | null;
@@ -31,6 +42,9 @@ export interface ChannelState {
   workspaceToken: string; // for E2E encryption
   inviteCode: string; // short human-readable invite code
   pendingBoardResolve: ((tasks: TaskItem[]) => void) | null;
+  pendingVarResolve: ((result: string) => void) | null;
+  pendingActivityResolve: ((result: string) => void) | null;
+  stats: SessionStats;
 }
 
 /**
@@ -72,12 +86,7 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
 
     // Try to open tunnel for remote peers
     try {
-      state.tunnel = await localtunnel({ port });
-      process.stderr.write(`[intandem] New tunnel open: ${state.tunnel.url}\n`);
-      state.tunnel.on('close', () => {
-        process.stderr.write('[intandem] Tunnel closed\n');
-        state.tunnel = null;
-      });
+      await setupTunnel(port, state, conn);
     } catch {
       process.stderr.write(`[intandem] Tunnel failed, local-only mode\n`);
     }
@@ -98,7 +107,7 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
     if (ok) {
       state.inviteCode = generateInviteCode();
       conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
-      const tunnelUrl = state.tunnel?.url;
+      const tunnelUrl = (state.tunnel as Tunnel | null)?.url;
       const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
       process.stderr.write(`[intandem] Promoted to hub owner for "${config.workspaceName}"\n`);
       return { ok: true, joinCode: shortInvite };
@@ -109,6 +118,58 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
   }
 
   return { ok: false };
+}
+
+const MAX_TUNNEL_RETRIES = 3;
+const TUNNEL_RETRY_DELAY = 5_000;
+
+async function setupTunnel(port: number, state: ChannelState, conn: HubConnection, retryCount = 0): Promise<void> {
+  try {
+    state.tunnel = await localtunnel({ port });
+    process.stderr.write(`[intandem] Tunnel open: ${state.tunnel.url}\n`);
+
+    if (retryCount > 0 && conn.connected) {
+      // Notify peers that tunnel is back
+      const payload = buildSignedMessage(state, {
+        type: 'status',
+        content: `Tunnel reconnected. Remote access restored.`,
+      });
+      conn.send({ kind: 'message', payload });
+    }
+
+    state.tunnel.on('close', () => {
+      process.stderr.write('[intandem] Tunnel closed — remote peers may lose access.\n');
+      state.tunnel = null;
+
+      if (conn.connected) {
+        const payload = buildSignedMessage(state, {
+          type: 'status',
+          content: `Tunnel dropped. Remote peers may disconnect. Attempting to reopen...`,
+        });
+        conn.send({ kind: 'message', payload });
+      }
+
+      // Retry with backoff
+      const nextRetry = retryCount + 1;
+      if (nextRetry <= MAX_TUNNEL_RETRIES) {
+        setTimeout(() => {
+          setupTunnel(port, state, conn, nextRetry).catch(() => {
+            process.stderr.write(`[intandem] Tunnel reopen failed after ${nextRetry} attempts — local-only mode\n`);
+          });
+        }, TUNNEL_RETRY_DELAY * nextRetry);
+      } else {
+        process.stderr.write(`[intandem] Tunnel reopen exhausted ${MAX_TUNNEL_RETRIES} retries — local-only mode\n`);
+      }
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[intandem] Tunnel failed (${message})\n`);
+    if (retryCount < MAX_TUNNEL_RETRIES) {
+      await new Promise((r) => setTimeout(r, TUNNEL_RETRY_DELAY));
+      return setupTunnel(port, state, conn, retryCount + 1);
+    }
+    throw err;
+  }
 }
 
 function waitForBoard(state: ChannelState): Promise<TaskItem[]> {
@@ -129,6 +190,8 @@ export async function handleToolCall(
   conn: HubConnection,
   state: ChannelState,
 ): Promise<ToolResult> {
+  state.stats.intandemToolCallCount++;
+
   switch (name) {
     case 'intandem_create':
       return handleCreate(args, conn, state);
@@ -142,14 +205,22 @@ export async function handleToolCall(
       return handleAddTask(args, conn, state);
     case 'intandem_claim_task':
       return handleClaimTask(args, conn, state);
+    case 'intandem_unclaim_task':
+      return handleUnclaimTask(args, conn, state);
     case 'intandem_update_task':
       return handleUpdateTask(args, conn, state);
     case 'intandem_plan':
       return handlePlan(args, conn, state);
     case 'intandem_share':
       return handleShare(args, conn, state);
+    case 'intandem_set_var':
+      return handleSetVar(args, conn, state);
+    case 'intandem_get_var':
+      return handleGetVar(args, conn, state);
     case 'intandem_peers':
       return handlePeers(conn, state);
+    case 'intandem_activity_log':
+      return handleActivityLog(args, conn, state);
     case 'intandem_leave':
       return handleLeave(conn, state);
     case 'intandem_rejoin':
@@ -190,29 +261,10 @@ async function handleCreate(
 
   let tunnelUrl = '';
   try {
-    state.tunnel = await localtunnel({ port });
-    tunnelUrl = state.tunnel.url;
-    process.stderr.write(`[intandem] Tunnel open: ${tunnelUrl}\n`);
-    state.tunnel.on('close', () => {
-      process.stderr.write('[intandem] Tunnel closed — remote peers may lose access. Local connections unaffected.\n');
-      state.tunnel = null;
-      // Try to reopen tunnel
-      localtunnel({ port })
-        .then((newTunnel) => {
-          state.tunnel = newTunnel;
-          process.stderr.write(`[intandem] Tunnel reopened: ${newTunnel.url}\n`);
-          newTunnel.on('close', () => {
-            process.stderr.write('[intandem] Tunnel closed again\n');
-            state.tunnel = null;
-          });
-        })
-        .catch(() => {
-          process.stderr.write('[intandem] Tunnel reopen failed — local-only mode\n');
-        });
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[intandem] Tunnel failed (${message}), using local-only mode\n`);
+    await setupTunnel(port, state, conn);
+    tunnelUrl = (state.tunnel as Tunnel | null)?.url ?? '';
+  } catch {
+    process.stderr.write(`[intandem] All tunnel attempts failed, using local-only mode\n`);
   }
 
   const localUrl = `ws://127.0.0.1:${port}`;
@@ -420,6 +472,7 @@ function buildSignedMessage(
     to: opts.to,
     content,
     timestamp: Date.now(),
+    msgId: randomBytes(4).toString('hex'),
     refs: opts.refs,
     encrypted: !!state.workspaceToken,
   };
@@ -442,6 +495,7 @@ function handleSend(args: Record<string, unknown>, conn: HubConnection, state: C
     content: args.message as string,
   });
   conn.send({ kind: 'message', payload });
+  state.stats.messagesSent++;
   const target = args.to ? `to ${args.to}` : 'to all peers';
   return text(`Sent ${msgType} ${target}: "${args.message}"`);
 }
@@ -451,26 +505,33 @@ async function handleBoard(conn: HubConnection, state: ChannelState): Promise<To
   conn.send({ kind: 'board', tasks: [] });
   const tasks = await waitForBoard(state);
   if (tasks.length === 0) return text('Task board is empty.');
-  const lines = tasks.map(
-    (t) =>
-      `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${t.description ? `\n    ${t.description}` : ''}`,
-  );
+  // Sort by priority: critical > high > medium > low
+  const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+  tasks.sort((a, b) => (priorityOrder[a.priority ?? 'medium'] ?? 2) - (priorityOrder[b.priority ?? 'medium'] ?? 2));
+  const lines = tasks.map((t) => {
+    const pri = t.priority && t.priority !== 'medium' ? ` [${t.priority.toUpperCase()}]` : '';
+    const deps = t.dependsOn && t.dependsOn.length > 0 ? ` (depends on: ${t.dependsOn.join(', ')})` : '';
+    return `[${t.id}] ${t.status.toUpperCase()}${pri} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${deps}${t.description ? `\n    ${t.description}` : ''}`;
+  });
   return text('Shared Task Board:\n' + lines.join('\n'));
 }
 
 function handleAddTask(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const dependsOn = args.depends_on as string[] | undefined;
   const task: TaskItem = {
     id: `T-${randomBytes(3).toString('hex')}`,
     title: args.title as string,
     description: args.description as string | undefined,
-    status: 'open',
+    status: dependsOn && dependsOn.length > 0 ? 'blocked' : 'open',
+    priority: (args.priority as TaskItem['priority']) ?? 'medium',
+    dependsOn,
     createdBy: state.myUsername,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
   conn.send({ kind: 'board_update', task });
-  return text(`Task created: [${task.id}] ${task.title}`);
+  return text(`Task created: [${task.id}] ${task.title}${dependsOn ? ` (blocked by ${dependsOn.join(', ')})` : ''}`);
 }
 
 function handleClaimTask(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
@@ -485,42 +546,79 @@ function handleClaimTask(args: Record<string, unknown>, conn: HubConnection, sta
     updatedAt: Date.now(),
   };
   conn.send({ kind: 'board_update', task });
+  state.stats.tasksClaimed++;
   return text(`Claimed task ${args.task_id}`);
 }
 
-function handleUpdateTask(args: Record<string, unknown>, conn: HubConnection, _state: ChannelState): ToolResult {
+function handleUnclaimTask(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
   const task: TaskItem = {
     id: args.task_id as string,
     title: '',
-    status: args.status as TaskItem['status'],
+    status: 'open',
+    assignee: '', // clear assignee
     createdBy: '',
     createdAt: 0,
     updatedAt: Date.now(),
   };
   conn.send({ kind: 'board_update', task });
-  return text(`Updated task ${args.task_id} → ${args.status}`);
+
+  // Notify peers so they know the task is available
+  const payload = buildSignedMessage(state, {
+    type: 'status',
+    content: `Released task ${args.task_id} — it's available for anyone to claim.`,
+  });
+  conn.send({ kind: 'message', payload });
+
+  return text(`Released task ${args.task_id} back to open.`);
+}
+
+function handleUpdateTask(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const status = args.status as TaskItem['status'];
+  const task: TaskItem = {
+    id: args.task_id as string,
+    title: '',
+    status,
+    createdBy: '',
+    createdAt: 0,
+    updatedAt: Date.now(),
+  };
+  conn.send({ kind: 'board_update', task });
+  if (status === 'done') state.stats.tasksCompleted++;
+  return text(`Updated task ${args.task_id} → ${status}`);
 }
 
 function handlePlan(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
-  const taskDefs = args.tasks as Array<{ title: string; description?: string; assignee?: string }>;
+  const taskDefs = args.tasks as Array<{
+    title: string;
+    description?: string;
+    assignee?: string;
+    priority?: TaskItem['priority'];
+    depends_on?: string[];
+  }>;
   if (!taskDefs || taskDefs.length === 0) return text('No tasks provided.');
 
   const created: string[] = [];
   for (const def of taskDefs) {
+    const hasDeps = def.depends_on && def.depends_on.length > 0;
     const task: TaskItem = {
       id: `T-${randomBytes(3).toString('hex')}`,
       title: def.title,
       description: def.description,
-      status: def.assignee ? 'claimed' : 'open',
+      status: hasDeps ? 'blocked' : def.assignee ? 'claimed' : 'open',
+      priority: def.priority ?? 'medium',
       assignee: def.assignee,
+      dependsOn: def.depends_on,
       createdBy: state.myUsername,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
     conn.send({ kind: 'board_update', task });
-    created.push(`[${task.id}] ${task.title}${task.assignee ? ` → ${task.assignee}` : ''}`);
+    created.push(
+      `[${task.id}] ${task.title}${task.assignee ? ` → ${task.assignee}` : ''}${hasDeps ? ' (blocked)' : ''}`,
+    );
   }
 
   const planSummary = created.join('\n');
@@ -588,10 +686,64 @@ function handleShare(args: Record<string, unknown>, conn: HubConnection, state: 
   return text(`Shared ${file}${startLine ? `:${startLine}-${endLine ?? ''}` : ''} ${target}`);
 }
 
+function handleSetVar(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const key = args.key as string;
+  const value = args.value as string;
+  if (!key || !value) return text('Both key and value are required.');
+  conn.send({ kind: 'var_set', key, value, setBy: state.myUsername });
+  return text(`Set variable "${key}" = "${value.length > 100 ? value.slice(0, 100) + '...' : value}"`);
+}
+
+async function handleGetVar(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const key = args.key as string;
+  if (!key) return text('Key is required. Use "*" to list all variables.');
+
+  return new Promise((resolve) => {
+    state.pendingVarResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'var_get', key });
+    setTimeout(() => {
+      if (state.pendingVarResolve) {
+        state.pendingVarResolve = null;
+        resolve(text('Timed out waiting for variable response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleActivityLog(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const limit = (args.limit as number) ?? 30;
+
+  return new Promise((resolve) => {
+    state.pendingActivityResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'activity_log_request', limit });
+    setTimeout(() => {
+      if (state.pendingActivityResolve) {
+        state.pendingActivityResolve = null;
+        resolve(text('Timed out waiting for activity log.'));
+      }
+    }, 3000);
+  });
+}
+
 function handlePeers(conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
   const healthMs = conn.lastHealthPing;
   const health = healthMs < 0 ? 'unknown' : healthMs < 60_000 ? 'good' : 'degraded';
+
+  // Request detailed peer info from hub
+  conn.send({ kind: 'peers' });
+
   const lines = [
     `Online peers: ${state.currentPeers.length > 0 ? state.currentPeers.join(', ') : 'none'}`,
     `Connection health: ${health}`,
@@ -599,8 +751,30 @@ function handlePeers(conn: HubConnection, state: ChannelState): ToolResult {
   return text(lines.join('\n'));
 }
 
+function generateSessionSummary(state: ChannelState): string {
+  const s = state.stats;
+  const duration = s.connectedAt > 0 ? Date.now() - s.connectedAt : 0;
+  const durationStr =
+    duration > 0 ? `${Math.floor(duration / 60_000)}m ${Math.floor((duration % 60_000) / 1000)}s` : 'unknown';
+  const totalCalls = s.intandemToolCallCount;
+  const overheadPct = totalCalls > 0 ? Math.round((totalCalls / (totalCalls + s.messagesSent)) * 100) : 0;
+
+  const lines = [
+    `Session Summary for "${state.workspaceName}":`,
+    `  Duration: ${durationStr}`,
+    `  Peers seen: ${s.peersSeenCount}`,
+    `  Tasks claimed: ${s.tasksClaimed} | completed: ${s.tasksCompleted}`,
+    `  Messages sent: ${s.messagesSent} | received: ${s.messagesReceived}`,
+    `  InTandem tool calls: ${totalCalls}`,
+    `  Collaboration: ${s.peersSeenCount > 0 && s.messagesReceived > 0 ? 'active' : s.peersSeenCount > 0 ? 'one-directional' : 'solo'}`,
+  ];
+  return lines.join('\n');
+}
+
 function handleLeave(conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected && !state.hub) return text('Not connected to any workspace.');
+
+  const summary = generateSessionSummary(state);
 
   conn.intentionalLeave = true;
   conn.cancelReconnect();
@@ -617,7 +791,7 @@ function handleLeave(conn: HubConnection, state: ChannelState): ToolResult {
   }
 
   clearWorkspaceConfig();
-  return text('Disconnected from workspace.');
+  return text(`Disconnected from workspace.\n\n${summary}`);
 }
 
 async function handleRejoin(conn: HubConnection, state: ChannelState): Promise<ToolResult> {

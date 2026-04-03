@@ -14,7 +14,7 @@ const VALID_MESSAGE_TYPES: MessageType[] = [
   'chat',
   'context',
 ];
-const VALID_TASK_STATUSES: TaskItem['status'][] = ['open', 'claimed', 'in_progress', 'done'];
+const VALID_TASK_STATUSES: TaskItem['status'][] = ['open', 'blocked', 'claimed', 'in_progress', 'done'];
 
 interface ConnectedPeer {
   ws: WebSocket;
@@ -222,6 +222,28 @@ export class TandemHub {
           workspace.inviteCode = msg.inviteCode;
           this.inviteCodes.set(msg.inviteCode, workspace);
           break;
+        case 'capabilities':
+          // Store and broadcast peer capabilities
+          this.broadcastToWorkspace(
+            workspace,
+            {
+              kind: 'capabilities',
+              username: peerUsername,
+              cwd: msg.cwd,
+              tools: msg.tools,
+            },
+            peerUsername,
+          );
+          break;
+        case 'activity_log_request':
+          this.send(ws, { kind: 'activity_log', entries: workspace.db.getActivityLog(msg.limit ?? 30) });
+          break;
+        case 'var_set':
+          this.handleVarSet(ws, workspace, peerUsername, msg.key, msg.value);
+          break;
+        case 'var_get':
+          this.handleVarGet(ws, workspace, msg.key);
+          break;
         // invite_resolve handled pre-auth above
       }
     });
@@ -233,6 +255,7 @@ export class TandemHub {
         const currentPeer = workspace.peers.get(peerUsername);
         if (currentPeer && currentPeer.ws === ws) {
           workspace.peers.delete(peerUsername);
+          workspace.db.logActivity(peerUsername, 'left');
           this.broadcastToWorkspace(workspace, {
             kind: 'peer_left',
             username: peerUsername,
@@ -328,9 +351,12 @@ export class TandemHub {
     });
 
     targetWorkspace.peers.set(username, peer);
+    targetWorkspace.db.logActivity(username, 'joined', `Session ${msg.sessionId.slice(0, 8)}`);
 
     this.send(ws, {
       kind: 'auth_ok',
+      username, // actual username after collision rename
+      token: targetWorkspace.token, // real token for E2E encryption
       workspace: {
         name: targetWorkspace.name,
         id: targetWorkspace.id,
@@ -401,7 +427,8 @@ export class TandemHub {
       return;
     }
 
-    // Log to DB
+    // Log activity and message to DB
+    workspace.db.logActivity(from, 'message', `${payload.type}${payload.to ? ` → ${payload.to}` : ' (broadcast)'}`);
     workspace.db.logMessage({
       type: payload.type,
       from: payload.from,
@@ -411,16 +438,28 @@ export class TandemHub {
     });
 
     // Route: specific peer or broadcast
+    const deliveredTo: string[] = [];
     if (payload.to) {
       const target = workspace.peers.get(payload.to);
       if (target) {
         this.send(target.ws, { kind: 'message', payload });
+        deliveredTo.push(payload.to);
       } else {
         this.send(peer.ws, { kind: 'error', message: `Peer "${payload.to}" not found` });
       }
     } else {
       // Broadcast to all except sender
-      this.broadcastToWorkspace(workspace, { kind: 'message', payload }, from);
+      for (const [username, p] of workspace.peers) {
+        if (username !== from && p.ws.readyState === WebSocket.OPEN) {
+          this.send(p.ws, { kind: 'message', payload });
+          deliveredTo.push(username);
+        }
+      }
+    }
+
+    // Send delivery receipt back to sender
+    if (payload.msgId && deliveredTo.length > 0) {
+      this.send(peer.ws, { kind: 'msg_ack', msgId: payload.msgId, deliveredTo });
     }
   }
 
@@ -442,10 +481,33 @@ export class TandemHub {
 
     const existing = workspace.db.getTask(task.id);
     if (existing) {
-      // H5 fix: only creator or assignee can mutate a task (or anyone can claim an open/unassigned task)
+      // Authorization: who can modify this task?
       const isCreator = existing.createdBy === from;
       const isAssignee = existing.assignee === from;
       const isClaimingOpen = task.status === 'claimed' && (!existing.assignee || existing.status === 'open');
+
+      // Protect tasks actively owned by another peer:
+      // If someone else has claimed or is working on it, only they can change it
+      // (creator can still edit title/description but not change status/assignee)
+      const ownedByOther =
+        existing.assignee &&
+        existing.assignee !== from &&
+        (existing.status === 'claimed' || existing.status === 'in_progress');
+
+      if (ownedByOther && !isAssignee) {
+        // Allow creator to edit title/description only, not status/assignee
+        if (isCreator && task.status === existing.status && !task.assignee) {
+          // Creator editing metadata only — allow below
+        } else {
+          this.send(ws, {
+            kind: 'board_reject',
+            taskId: task.id,
+            reason: `Task "${existing.title}" is ${existing.status} by ${existing.assignee}. Only they can update it.`,
+          });
+          return;
+        }
+      }
+
       if (!isCreator && !isAssignee && !isClaimingOpen) {
         this.send(ws, {
           kind: 'board_reject',
@@ -472,21 +534,100 @@ export class TandemHub {
       }
 
       // Only update fields that have meaningful values (non-empty strings)
-      const updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description'>> = {
+      const updates: Partial<
+        Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description' | 'priority' | 'dependsOn'>
+      > = {
         status: task.status,
       };
-      if (task.assignee !== undefined) updates.assignee = task.assignee;
+      if (task.assignee !== undefined) updates.assignee = task.assignee || '';
       if (task.title) updates.title = task.title;
       if (task.description !== undefined) updates.description = task.description;
+      if (task.priority) updates.priority = task.priority;
+      if (task.dependsOn) updates.dependsOn = task.dependsOn;
       const updated = workspace.db.updateTask(task.id, updates);
       if (updated) {
-        this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated });
+        workspace.db.logActivity(
+          from,
+          'task_update',
+          `[${task.id}] → ${task.status}${task.assignee ? ` (${task.assignee})` : ''}`,
+        );
+        this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated, triggeredBy: from });
+
+        // When a task completes, unblock dependent tasks
+        if (updated.status === 'done') {
+          this.resolveBlockedTasks(workspace, updated.id, from);
+        }
       }
     } else {
       // H5 fix: enforce createdBy on new tasks
       task.createdBy = from;
+      // Auto-set blocked status if task has unfinished dependencies
+      if (task.dependsOn && task.dependsOn.length > 0) {
+        const allDone = task.dependsOn.every((depId) => {
+          const dep = workspace.db.getTask(depId);
+          return dep && dep.status === 'done';
+        });
+        if (!allDone) task.status = 'blocked';
+      }
       workspace.db.createTask(task);
-      this.broadcastToWorkspace(workspace, { kind: 'board_update', task });
+      workspace.db.logActivity(
+        from,
+        'task_create',
+        `[${task.id}] ${task.title}${task.priority ? ` (${task.priority})` : ''}`,
+      );
+      this.broadcastToWorkspace(workspace, { kind: 'board_update', task, triggeredBy: from });
+    }
+  }
+
+  /** When a task completes, check if any blocked tasks can be unblocked */
+  private resolveBlockedTasks(workspace: Workspace, completedTaskId: string, triggeredBy: string): void {
+    const allTasks = workspace.db.getAllTasks();
+    for (const t of allTasks) {
+      if (t.status !== 'blocked' || !t.dependsOn) continue;
+      if (!t.dependsOn.includes(completedTaskId)) continue;
+
+      // Check if ALL dependencies are now done
+      const allDone = t.dependsOn.every((depId) => {
+        const dep = workspace.db.getTask(depId);
+        return dep && dep.status === 'done';
+      });
+
+      if (allDone) {
+        const updated = workspace.db.updateTask(t.id, { status: 'open' });
+        if (updated) {
+          workspace.db.logActivity('system', 'task_unblocked', `[${t.id}] ${t.title} — all dependencies met`);
+          this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated, triggeredBy });
+        }
+      }
+    }
+  }
+
+  private handleVarSet(ws: WebSocket, workspace: Workspace, from: string, key: string, value: string): void {
+    if (key.length > 100) {
+      this.send(ws, { kind: 'error', message: 'Variable key too long (max 100 chars)' });
+      return;
+    }
+    if (value.length > 5000) {
+      this.send(ws, { kind: 'error', message: 'Variable value too long (max 5000 chars)' });
+      return;
+    }
+    workspace.db.setVar(key, value, from);
+    this.broadcastToWorkspace(workspace, { kind: 'var_set', key, value, setBy: from });
+  }
+
+  private handleVarGet(ws: WebSocket, workspace: Workspace, key: string): void {
+    if (key === '*') {
+      // Return all vars
+      const vars = workspace.db.getAllVars();
+      this.send(ws, { kind: 'vars_list', vars });
+    } else {
+      const result = workspace.db.getVar(key);
+      this.send(ws, {
+        kind: 'var_result',
+        key,
+        value: result?.value ?? null,
+        setBy: result?.setBy,
+      });
     }
   }
 
@@ -500,6 +641,7 @@ export class TandemHub {
       list.push({
         username,
         connectedAt: peer.connectedAt,
+        lastActiveAt: peer.lastMessageAt || peer.connectedAt,
       });
     }
     this.send(ws, { kind: 'peers', list });

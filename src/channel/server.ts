@@ -1,6 +1,8 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { generateUsername } from '../shared/names.js';
 import { sanitizeContent, decryptMessage, verifySignature } from '../shared/crypto.js';
 import {
@@ -15,6 +17,24 @@ import type { HubMessage } from '../shared/types.js';
 import { HubConnection } from './connection.js';
 import { TOOL_DEFINITIONS } from './tools.js';
 import { handleToolCall, promoteToHub, type ChannelState } from './handlers.js';
+
+/** Detect MCP servers configured in the project's .mcp.json */
+function detectMcpServers(): string[] {
+  const servers: string[] = [];
+  const mcpPaths = [join(process.cwd(), '.mcp.json'), join(process.cwd(), '.claude', 'mcp.json')];
+  for (const p of mcpPaths) {
+    try {
+      if (existsSync(p)) {
+        const data = JSON.parse(readFileSync(p, 'utf-8'));
+        const mcpServers = data.mcpServers || data.servers || {};
+        servers.push(...Object.keys(mcpServers));
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+  return servers;
+}
 
 function buildInstructions(state: ChannelState, connected: boolean): string {
   return `You have InTandem installed — a real-time pair programming tool connecting multiple Claude Code sessions.
@@ -48,9 +68,10 @@ Your username is "${state.myUsername}".
 
 Setup: intandem_create, intandem_join, intandem_rejoin
 Planning: intandem_plan (create + assign multiple tasks at once)
-Board: intandem_board, intandem_add_task, intandem_claim_task, intandem_update_task
+Board: intandem_board, intandem_add_task, intandem_claim_task, intandem_unclaim_task, intandem_update_task
 Comms: intandem_send (types: finding, task, question, status, handoff, review, chat, context)
 Sharing: intandem_share (share a file/snippet with peers — includes actual code content)
+Context: intandem_set_var / intandem_get_var (shared workspace variables for config, IDs, etc.)
 Info: intandem_peers, intandem_leave
 
 All messages are end-to-end encrypted (AES-256-GCM) and signed (HMAC-SHA256).
@@ -76,6 +97,18 @@ export async function startChannelServer(): Promise<void> {
     workspaceToken: '',
     inviteCode: '',
     pendingBoardResolve: null,
+    pendingVarResolve: null,
+    pendingActivityResolve: null,
+    stats: {
+      connectedAt: 0,
+      toolCallCount: 0,
+      intandemToolCallCount: 0,
+      messagesSent: 0,
+      messagesReceived: 0,
+      tasksClaimed: 0,
+      tasksCompleted: 0,
+      peersSeenCount: 0,
+    },
   };
 
   // Check if we have a saved workspace config (reconnect on restart)
@@ -85,9 +118,37 @@ export async function startChannelServer(): Promise<void> {
   function handleHubMessage(msg: HubMessage): void {
     switch (msg.kind) {
       case 'auth_ok':
+        // Update username if hub renamed us (collision avoidance)
+        if (msg.username && msg.username !== state.myUsername) {
+          process.stderr.write(`[intandem] Username assigned by hub: ${msg.username} (was ${state.myUsername})\n`);
+          state.myUsername = msg.username;
+        }
+        // Update token to real workspace token (joiners via invite get a ticket, not the real token)
+        if (msg.token) {
+          state.workspaceToken = msg.token;
+        }
         state.workspaceName = msg.workspace.name;
         state.currentPeers = msg.workspace.peers.filter((p) => p !== state.myUsername);
+        state.stats.connectedAt = Date.now();
+        state.stats.peersSeenCount = state.currentPeers.length;
         process.stderr.write(`[intandem] Connected to "${state.workspaceName}" as ${state.myUsername}\n`);
+        // Auto-broadcast capabilities to workspace
+        const mcpTools = detectMcpServers();
+        conn.send({
+          kind: 'capabilities',
+          username: state.myUsername,
+          cwd: process.cwd(),
+          tools: mcpTools,
+        });
+
+        // Send connection context so Claude knows what to do
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `CONNECTED to workspace "${state.workspaceName}" as "${state.myUsername}". Peers online: ${state.currentPeers.join(', ') || 'none yet'}.\n\nIMPORTANT — do these now:\n1. Call intandem_board to see tasks and assignments\n2. Claim an unclaimed task with intandem_claim_task\n3. Announce yourself with intandem_send (type: "status")`,
+            meta: { type: 'status', event: 'connected' },
+          },
+        });
         break;
 
       case 'auth_fail':
@@ -96,6 +157,7 @@ export async function startChannelServer(): Promise<void> {
 
       case 'peer_joined':
         state.currentPeers = msg.peers.filter((p) => p !== state.myUsername);
+        state.stats.peersSeenCount = Math.max(state.stats.peersSeenCount, state.currentPeers.length);
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
@@ -103,6 +165,10 @@ export async function startChannelServer(): Promise<void> {
             meta: { peer: msg.username, type: 'status', event: 'joined' },
           },
         });
+        // Auto-request board so we can suggest unclaimed tasks to the new peer
+        if (conn.connected) {
+          conn.send({ kind: 'board', tasks: [] });
+        }
         break;
 
       case 'peer_left':
@@ -118,6 +184,7 @@ export async function startChannelServer(): Promise<void> {
 
       case 'message': {
         const p = msg.payload;
+        state.stats.messagesReceived++;
 
         // Verify signature if present
         if (p.signature && state.workspaceToken) {
@@ -173,10 +240,15 @@ export async function startChannelServer(): Promise<void> {
           const lines = msg.tasks.map(
             (t) => `[${t.id}] ${t.status.toUpperCase()} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}`,
           );
+          const openTasks = msg.tasks.filter((t) => t.status === 'open' && !t.assignee);
+          let hint = '';
+          if (openTasks.length > 0) {
+            hint = `\n\n${openTasks.length} unclaimed task(s) available — use intandem_claim_task to pick one up: ${openTasks.map((t) => t.id).join(', ')}`;
+          }
           mcp.notification({
             method: 'notifications/claude/channel',
             params: {
-              content: `Current task board:\n${lines.join('\n')}`,
+              content: `Current task board:\n${lines.join('\n')}${hint}`,
               meta: { type: 'task', event: 'board_sync' },
             },
           });
@@ -185,11 +257,12 @@ export async function startChannelServer(): Promise<void> {
 
       case 'board_update': {
         const t = msg.task;
+        const by = msg.triggeredBy ? ` by ${msg.triggeredBy}` : '';
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
-            content: `Task [${t.id}] "${t.title}" → ${t.status}${t.assignee ? ` (assigned to ${t.assignee})` : ''}`,
-            meta: { type: 'task', event: 'board_update' },
+            content: `Task [${t.id}] "${t.title}" → ${t.status}${t.assignee ? ` (assigned to ${t.assignee})` : ''}${by}`,
+            meta: { type: 'task', event: 'board_update', triggeredBy: msg.triggeredBy },
           },
         });
         break;
@@ -203,6 +276,97 @@ export async function startChannelServer(): Promise<void> {
             meta: { type: 'task', event: 'board_reject', taskId: msg.taskId },
           },
         });
+        break;
+
+      case 'peers': {
+        const now = Date.now();
+        const peerLines = (msg.list ?? [])
+          .filter((p) => p.username !== state.myUsername)
+          .map((p) => {
+            const idleMs = now - p.lastActiveAt;
+            const idleStr =
+              p.lastActiveAt === p.connectedAt
+                ? 'no activity yet'
+                : idleMs < 60_000
+                  ? 'active now'
+                  : `idle ${Math.floor(idleMs / 60_000)}m`;
+            return `  ${p.username} — ${idleStr}`;
+          });
+        if (peerLines.length > 0) {
+          mcp.notification({
+            method: 'notifications/claude/channel',
+            params: {
+              content: `Peer activity:\n${peerLines.join('\n')}`,
+              meta: { type: 'status', event: 'peers' },
+            },
+          });
+        }
+        break;
+      }
+
+      case 'capabilities': {
+        const toolList = msg.tools.length > 0 ? msg.tools.join(', ') : 'none detected';
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `${msg.username} capabilities:\n  MCP servers: ${toolList}\n  Working directory: ${msg.cwd}`,
+            meta: { peer: msg.username, type: 'context', event: 'capabilities' },
+          },
+        });
+        break;
+      }
+
+      case 'activity_log':
+        if (state.pendingActivityResolve) {
+          if (msg.entries.length === 0) {
+            state.pendingActivityResolve('No activity recorded yet.');
+          } else {
+            const lines = msg.entries.map((e) => {
+              const time = new Date(e.timestamp).toLocaleTimeString();
+              return `[${time}] ${e.actor}: ${e.action}${e.detail ? ` — ${e.detail}` : ''}`;
+            });
+            state.pendingActivityResolve(`Activity Log:\n${lines.join('\n')}`);
+          }
+          state.pendingActivityResolve = null;
+        }
+        break;
+
+      case 'msg_ack':
+        // Delivery receipt — log for debugging, could surface to Claude if needed
+        process.stderr.write(`[intandem] Message ${msg.msgId} delivered to: ${msg.deliveredTo.join(', ')}\n`);
+        break;
+
+      case 'var_set':
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `Variable "${msg.key}" set to "${msg.value.length > 200 ? msg.value.slice(0, 200) + '...' : msg.value}" by ${msg.setBy}`,
+            meta: { type: 'context', event: 'var_set', key: msg.key },
+          },
+        });
+        break;
+
+      case 'var_result':
+        if (state.pendingVarResolve) {
+          if (msg.value !== null) {
+            state.pendingVarResolve(`${msg.key} = ${msg.value} (set by ${msg.setBy})`);
+          } else {
+            state.pendingVarResolve(`Variable "${msg.key}" not found.`);
+          }
+          state.pendingVarResolve = null;
+        }
+        break;
+
+      case 'vars_list':
+        if (state.pendingVarResolve) {
+          if (msg.vars.length === 0) {
+            state.pendingVarResolve('No workspace variables set.');
+          } else {
+            const lines = msg.vars.map((v) => `  ${v.key} = ${v.value} (set by ${v.setBy})`);
+            state.pendingVarResolve(`Workspace variables:\n${lines.join('\n')}`);
+          }
+          state.pendingVarResolve = null;
+        }
         break;
 
       case 'error':
