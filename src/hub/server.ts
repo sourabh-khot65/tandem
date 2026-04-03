@@ -255,7 +255,11 @@ export class TandemHub {
         const currentPeer = workspace.peers.get(peerUsername);
         if (currentPeer && currentPeer.ws === ws) {
           workspace.peers.delete(peerUsername);
-          workspace.db.logActivity(peerUsername, 'left');
+          try {
+            workspace.db.logActivity(peerUsername, 'left');
+          } catch {
+            // DB may already be closed during shutdown
+          }
           this.broadcastToWorkspace(workspace, {
             kind: 'peer_left',
             username: peerUsername,
