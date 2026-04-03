@@ -1,223 +1,167 @@
 # InTandem
 
-**Real-time pair programming between multiple Claude Code sessions.**
+Real-time multi-agent collaboration for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-InTandem connects up to 5 Claude Code sessions into a shared workspace. Share findings, divide tasks, ask questions, and coordinate — all from inside Claude's terminal. Works across machines automatically.
+InTandem connects up to 5 Claude Code sessions into a shared workspace with end-to-end encrypted messaging, a persistent task board, and automatic peer discovery. It runs as an MCP server — no external infrastructure required.
 
-## How It Looks
-
-**Teammate A** (inside Claude Code):
-
-```
-You: Create an intandem workspace called fix-auth-bug
-
-Claude: [calls intandem_create]
-> Workspace "fix-auth-bug" created!
-> Your username: CosmicYoda
->
-> Share this join code with your teammates:
-> eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
->
-> Tunnel: https://quiet-fish-42.loca.lt (works across machines/networks)
-> Waiting for peers... (0/5 slots)
-```
-
-**Teammate B** (inside their Claude Code):
-
-```
-You: Join this intandem workspace: eyJoIjoid3M6Ly8xMjcuMC4wLjE6OTkw...
-
-Claude: [calls intandem_join]
-> Connected to "fix-auth-bug" as NeonNaruto!
-> Peers online: CosmicYoda
-```
-
-**Now they're connected.** Claude A finds a bug:
-
-```
-Claude A: I found the issue — null session store in UserService line 87.
-Let me share this with the team.
-
-[calls intandem_send type="finding"]
-> Sent finding to all peers
-```
-
-**Claude B receives it instantly:**
-
-```
-<channel source="intandem" peer="CosmicYoda" type="finding">
-Null session store in UserService.authenticate() at line 87.
-The Redis connection pool is exhausted under load.
-</channel>
-
-Claude B: CosmicYoda found the root cause. Want me to work on
-fixing the Redis pool config while they handle the null guard?
-```
-
-## Setup
-
-### 1. Install
+## Install
 
 ```bash
 npm install -g intandem
+intandem init   # adds MCP config to your project
 ```
 
-### 2. Initialize (in your project directory)
+## Usage
 
-```bash
-intandem init
-```
-
-This writes a `.mcp.json` entry and generates your username.
-
-### 3. Start Claude Code
-
-```bash
-claude --dangerously-load-development-channels server:intandem
-```
-
-### 4. Create or join (inside Claude)
-
-Tell Claude:
-
-- **Create:** "Create an intandem workspace called fix-auth-bug"
-- **Join:** "Join this intandem workspace: `<paste join code>`"
-
-That's it. Everything else happens inside Claude.
-
-## Remote / Cross-Machine
-
-InTandem automatically opens a tunnel when you create a workspace. The join code contains the public URL — teammates on different machines or networks just paste the code and connect. No port forwarding, no IP addresses, no ngrok setup.
+**Create a workspace** in one Claude Code session:
 
 ```
-Machine A (San Francisco)          Machine B (New York)
-┌──────────────────────┐          ┌──────────────────────┐
-│ Claude Code          │          │ Claude Code          │
-│                      │          │                      │
-│ "Create workspace"   │          │ "Join: eyJo..."      │
-│   ↓                  │          │   ↓                  │
-│ Hub + auto-tunnel ───┼── wss ──┼─► Channel connects   │
-│ https://xyz.loca.lt  │          │                      │
-└──────────────────────┘          └──────────────────────┘
+> Create an intandem workspace called fix-auth-bug
+
+Workspace "fix-auth-bug" created!
+Share this code with teammates:
+
+  VPA6KW@quiet-fish-42.loca.lt
+
+Messages are end-to-end encrypted.
 ```
 
-The tunnel is free and requires no account. It's powered by [localtunnel](https://github.com/localtunnel/localtunnel).
-
-## What Claude Can Do
-
-Once connected, Claude has these tools:
-
-| Tool                   | What it does                                                                     |
-| ---------------------- | -------------------------------------------------------------------------------- |
-| `intandem_create`      | Create a workspace, get a join code to share                                     |
-| `intandem_join`        | Join a workspace using a teammate's code                                         |
-| `intandem_send`        | Send a message to peers (finding, task, question, status, handoff, review, chat) |
-| `intandem_peers`       | See who's online                                                                 |
-| `intandem_board`       | View the shared task board                                                       |
-| `intandem_add_task`    | Add a task to the board                                                          |
-| `intandem_claim_task`  | Claim a task                                                                     |
-| `intandem_update_task` | Update a task's status                                                           |
-| `intandem_plan`        | Create multiple tasks at once, optionally assigned to peers                      |
-| `intandem_rejoin`      | Reconnect to a previously joined workspace (no join code needed)                 |
-| `intandem_leave`       | Disconnect                                                                       |
-
-You don't call these tools directly — just talk to Claude naturally:
-
-- "Share with the team that the bug is in the auth middleware"
-- "What's on the task board?"
-- "Claim the Redis pool task"
-- "Tell NeonNaruto I'm done with the service layer"
-- "Ask the team how the validation pipeline works"
-
-## Message Types
-
-| Type       | When to use                                                    |
-| ---------- | -------------------------------------------------------------- |
-| `finding`  | Discovered something: bug location, root cause, useful context |
-| `task`     | Dividing work: "I'll do X, you do Y"                           |
-| `question` | Asking peers: "How does X work?"                               |
-| `status`   | Progress update: "Done with X, moving to Y"                    |
-| `handoff`  | Transferring work with context                                 |
-| `review`   | Code review feedback                                           |
-| `chat`     | General conversation                                           |
-
-## Usernames
-
-InTandem auto-generates pop culture usernames on first run:
+**Join from another session** — same machine or across the network:
 
 ```
-CosmicYoda     SilentNaruto     NeonGandalf     LazyThor
-WildSherlock   ChaoticBatman    ZenMorpheus     EpicAragorn
-SlyFuriosa     RadiantAang      BoldRipley      SwiftLegolas
+> Join intandem workspace: VPA6KW@quiet-fish-42.loca.lt
+
+Connected to "fix-auth-bug" as NeonNaruto!
+Peers online: CosmicYoda
+
+CosmicYoda capabilities:
+  MCP servers: grafana-prod, mcp-atlassian
+  Working directory: /projects/backend
 ```
 
-Check yours: `intandem whoami`
-Change it: `intandem rename SilentNaruto`
+Peers exchange findings, divide tasks, share code, and coordinate — all through natural language. Claude handles the tool calls automatically.
 
-## CLI Reference
+## Core Concepts
 
-The CLI is minimal — just setup and identity. Everything else happens inside Claude.
+### Task Board
 
-```bash
-intandem init              # Add to .mcp.json in current directory
-intandem whoami            # Show your username
-intandem rename <name>     # Change your username
+A shared, persistent board for dividing work across peers.
+
 ```
+[T-a1b2c3] CLAIMED [CRITICAL] - Fix auth vulnerability (CosmicYoda)
+[T-d4e5f6] IN_PROGRESS [HIGH]  - Redis pool tuning (NeonNaruto)
+[T-g7h8i9] BLOCKED             - Deploy to staging (depends on: T-a1b2c3, T-d4e5f6)
+[T-j0k1l2] OPEN                - Update documentation
+```
+
+Tasks support four priority levels, dependency chains with automatic unblocking, and ownership protection — a claimed task can only be updated by its assignee.
+
+### Messaging
+
+Eight message types for structured collaboration:
+
+| Type       | Purpose                                               |
+| ---------- | ----------------------------------------------------- |
+| `finding`  | Share a discovery — bug location, root cause, pattern |
+| `status`   | Progress updates                                      |
+| `question` | Ask peers for context or clarification                |
+| `handoff`  | Transfer work with context to a specific peer         |
+| `task`     | Coordinate who does what                              |
+| `review`   | Code review feedback                                  |
+| `context`  | Share configuration, environment details, setup       |
+| `chat`     | General discussion                                    |
+
+All messages include delivery receipts. Directed messages route to a specific peer; broadcasts go to everyone.
+
+### Workspace Variables
+
+Shared key-value state for configuration that all peers need:
+
+```
+intandem_set_var key="datasource_uid" value="P8E80F9AEF21F6940"
+
+# Any peer can retrieve it:
+intandem_get_var key="datasource_uid"
+```
+
+Variables persist for the session and broadcast changes to all peers on update.
+
+### Capability Discovery
+
+When a peer joins, InTandem automatically detects and broadcasts their available MCP servers and working directory. This lets the workspace creator assign tasks to peers who have the right tools.
+
+### Activity Log
+
+A timestamped audit trail of all workspace events — joins, disconnects, task mutations, messages. Query it with `intandem_activity_log` to understand what happened and when.
+
+## Tools
+
+| Tool                    | Description                                          |
+| ----------------------- | ---------------------------------------------------- |
+| `intandem_create`       | Create a workspace and get an invite code            |
+| `intandem_join`         | Join using an invite code                            |
+| `intandem_send`         | Send a typed message to peers                        |
+| `intandem_board`        | View the task board                                  |
+| `intandem_add_task`     | Create a task with priority and dependencies         |
+| `intandem_claim_task`   | Claim a task                                         |
+| `intandem_unclaim_task` | Release a task back to open                          |
+| `intandem_update_task`  | Change task status                                   |
+| `intandem_plan`         | Batch-create tasks with assignments and dependencies |
+| `intandem_share`        | Share a file or code snippet                         |
+| `intandem_set_var`      | Set a shared workspace variable                      |
+| `intandem_get_var`      | Read a variable (or `*` for all)                     |
+| `intandem_activity_log` | View workspace event history                         |
+| `intandem_peers`        | List online peers with activity status               |
+| `intandem_rejoin`       | Reconnect to a previous workspace                    |
+| `intandem_leave`        | Disconnect with session summary                      |
+
+All tools are called by Claude automatically based on natural language — you never invoke them directly.
+
+## Networking
+
+Workspaces are local-first. When you create one, InTandem starts a WebSocket hub on localhost and opens a [localtunnel](https://github.com/localtunnel/localtunnel) for remote peers. The invite code encodes the routing hint:
+
+```
+VPA6KW                           # local peers (same machine)
+VPA6KW@quiet-fish-42.loca.lt    # remote peers (any network)
+```
+
+If the tunnel drops, InTandem retries automatically and notifies connected peers. If the hub owner disconnects, another peer promotes to hub owner and the workspace continues.
 
 ## Security
 
-- **Workspace tokens**: 32-byte cryptographic random token. Only holders can connect.
-- **Content sanitization**: Peer messages are escaped to prevent tag injection.
-- **Sender verification**: Hub authenticates every connection against the workspace token.
-- **Rate limiting**: Max 5 peers, 30 messages/minute per peer.
-- **Prompt injection prevention**: Messages arrive in structured `<channel>` tags with verified metadata. Claude treats them as collaboration context, not instructions.
-- **Auto-tunnel**: Uses HTTPS/WSS when tunneled. Local connections use WS.
+InTandem is designed for zero-trust collaboration between peers:
+
+- **E2E encryption** — AES-256-GCM with HKDF-derived keys (RFC 5869). The hub routes ciphertext; it cannot read message content.
+- **Message signing** — HMAC-SHA256 with constant-time verification. The hub enforces sender identity on every message.
+- **Invite resolution** — One-time auth tickets with 30-second TTL, rate-limited to 5 attempts per minute per IP.
+- **Task ownership** — Claimed tasks are protected; only the assignee can mutate status. The hub enforces `createdBy` on new tasks.
+- **Content sanitization** — Angle brackets escaped to prevent prompt injection through channel tags.
+- **Resource limits** — 64 KB max payload, 30 messages/minute per peer, 5 peers per workspace.
+- **Replay protection** — Messages with timestamps beyond a 2-minute window are rejected.
+- **Path traversal** — `intandem_share` validates paths against the project directory before reading files.
 
 ## Architecture
 
 ```
-src/
-  shared/
-    types.ts      # Protocol types
-    names.ts      # Username generator
-    crypto.ts     # Tokens, join codes, sanitization
-    config.ts     # ~/.tandem/ config management (per-PID sessions)
-  hub/
-    server.ts     # WebSocket hub (routing, auth, rate limiting, ping/pong)
-    db.ts         # SQLite persistence (task board + message log)
-  channel/
-    server.ts     # MCP server orchestrator
-    connection.ts # WebSocket connection manager (reconnect, generation counter)
-    handlers.ts   # Tool call handler functions
-    tools.ts      # Tool definitions (JSON schemas)
-  types/
-    localtunnel.d.ts  # Type declarations for localtunnel
-  cli.ts          # CLI (init, whoami, rename)
-  index.ts        # Public API
+Claude A ──► MCP tool call ──► Channel (encrypt) ──► WebSocket Hub ──► Channel (decrypt) ──► MCP notification ──► Claude B
 ```
 
-### How it works under the hood
+InTandem runs as a single process per Claude Code session. When creating a workspace, the process embeds the hub — no separate server to manage.
 
-1. `intandem init` writes a `.mcp.json` entry pointing to `npx intandem channel`
-2. Claude Code spawns the MCP server as a subprocess on startup
-3. The MCP server starts in idle mode with all tools available
-4. When Claude calls `intandem_create`:
-   - Starts a WebSocket hub on a random port
-   - Opens a localtunnel for remote access
-   - Connects to its own hub as a peer
-   - Returns a join code containing the tunnel URL + workspace ID + token
-5. When Claude calls `intandem_join`:
-   - Decodes the join code
-   - Connects to the remote hub via the tunnel URL
-6. Messages flow: Claude A → MCP tools → WebSocket hub → MCP channel → Claude B
-7. Task board persists in SQLite at `~/.tandem/data/`
+```
+src/
+  channel/         MCP server, WebSocket client, tool handlers
+  hub/             WebSocket hub, SQLite persistence
+  shared/          Protocol types, cryptography, configuration
+  cli.ts           CLI entrypoint (init, whoami, rename)
+```
 
-## Limitations
+**Hub** — A WebSocket server that authenticates peers, routes encrypted messages, manages the task board, stores workspace variables, and maintains an activity log in SQLite.
 
-- **Research preview**: Channels require `--dangerously-load-development-channels` flag
-- **Hub is ephemeral**: When the creator's Claude session ends, the hub shuts down. Teammates auto-reconnect when a new session starts.
-- **Tunnel reliability**: localtunnel is free but can occasionally be slow. For production teams, deploy the hub on a server instead.
-- **Channels auth**: Requires claude.ai login. API key auth not supported.
+**Channel** — An MCP server that Claude Code spawns as a subprocess. Handles E2E encryption/decryption, connection lifecycle with automatic reconnect, and translates between MCP tool calls and hub protocol messages.
+
+Data is stored at `~/.tandem/` — session configs in `sessions/`, workspace databases in `data/`.
 
 ## Development
 
@@ -227,8 +171,16 @@ cd tandem
 npm install
 npm run build
 npm run dev          # watch mode
-npm run lint         # typecheck + format check
-npm run format       # auto-format with Prettier
+npm test             # run tests
+npm run lint         # typecheck + format
+```
+
+## CLI
+
+```bash
+intandem init              # write .mcp.json in current directory
+intandem whoami            # print your username
+intandem rename <name>     # change your username
 ```
 
 ## License
