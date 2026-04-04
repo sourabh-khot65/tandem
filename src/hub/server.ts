@@ -63,6 +63,7 @@ export class TandemHub {
   private maxMessagesPerWindow = 30;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private rateLimitInterval: ReturnType<typeof setInterval> | null = null;
+  private intervalGuards: Set<ReturnType<typeof setInterval>> = new Set();
 
   createWorkspace(name: string, maxPeers = 5): { workspaceId: string; token: string } {
     const workspaceId = generateWorkspaceId();
@@ -123,9 +124,11 @@ export class TandemHub {
 
       // Rate limit reset timer
       this.rateLimitInterval = setInterval(() => this.resetRateLimits(), this.rateLimitWindow);
+      this.intervalGuards.add(this.rateLimitInterval);
 
       // Ping all peers every 30s to detect dead connections
       this.pingInterval = setInterval(() => this.pingAllPeers(), 30_000);
+      this.intervalGuards.add(this.pingInterval);
     });
   }
 
@@ -775,8 +778,10 @@ export class TandemHub {
   }
 
   stop(): void {
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    if (this.rateLimitInterval) clearInterval(this.rateLimitInterval);
+    for (const interval of this.intervalGuards) {
+      clearInterval(interval);
+    }
+    this.intervalGuards.clear();
     for (const workspace of this.workspaces.values()) {
       workspace.db.close();
       for (const peer of workspace.peers.values()) {
