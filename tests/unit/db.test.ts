@@ -258,4 +258,219 @@ describe('TandemDB', () => {
       expect(log.length).toBeLessThanOrEqual(200);
     });
   });
+
+  // ─── Task Results ──────────────────────────────────────────────────
+
+  describe('task results', () => {
+    it('creates a task with result', () => {
+      db.createTask({
+        id: 'T-res1',
+        title: 'Task with result',
+        status: 'done',
+        result: '58 insurance records missing',
+        createdBy: 'alice',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      const task = db.getTask('T-res1');
+      expect(task!.result).toBe('58 insurance records missing');
+    });
+
+    it('updates task with result on completion', () => {
+      db.createTask({
+        id: 'T-res2',
+        title: 'Complete me',
+        status: 'in_progress',
+        createdBy: 'alice',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      db.updateTask('T-res2', { status: 'done', result: 'Fixed the Redis pool config' });
+      const task = db.getTask('T-res2');
+      expect(task!.status).toBe('done');
+      expect(task!.result).toBe('Fixed the Redis pool config');
+    });
+
+    it('result is undefined when not set', () => {
+      db.createTask({
+        id: 'T-res3',
+        title: 'No result',
+        status: 'open',
+        createdBy: 'alice',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      expect(db.getTask('T-res3')!.result).toBeUndefined();
+    });
+  });
+
+  // ─── Findings ──────────────────────────────────────────────────────
+
+  describe('findings', () => {
+    it('creates and retrieves a finding', () => {
+      db.createFinding({
+        id: 'F-001',
+        service: 'payment-service',
+        severity: 'high',
+        summary: 'Insurance records not found for legacy lab groups',
+        category: 'data_missing',
+        count: 58,
+        patterns: [{ pattern: 'Insurance records not found', count: 58, source: 'LegacyInsuranceServiceImpl' }],
+        recommendation: 'Investigate V1 data sync gap',
+        reportedBy: 'alice',
+        timestamp: 1000,
+      });
+
+      const findings = db.getFindings();
+      expect(findings).toHaveLength(1);
+      expect(findings[0].service).toBe('payment-service');
+      expect(findings[0].severity).toBe('high');
+      expect(findings[0].summary).toBe('Insurance records not found for legacy lab groups');
+      expect(findings[0].count).toBe(58);
+      expect(findings[0].patterns).toHaveLength(1);
+      expect(findings[0].patterns![0].pattern).toBe('Insurance records not found');
+      expect(findings[0].recommendation).toBe('Investigate V1 data sync gap');
+    });
+
+    it('creates finding with minimal fields', () => {
+      db.createFinding({
+        id: 'F-002',
+        service: 'auth-service',
+        severity: 'critical',
+        summary: 'JWKS key resolution failing',
+        reportedBy: 'bob',
+        timestamp: 2000,
+      });
+
+      const findings = db.getFindings();
+      const f = findings.find((f) => f.id === 'F-002');
+      expect(f).toBeDefined();
+      expect(f!.summary).toBe('JWKS key resolution failing');
+      expect(f!.category).toBeUndefined();
+      expect(f!.count).toBeUndefined();
+      expect(f!.patterns).toBeUndefined();
+    });
+
+    it('filters by severity', () => {
+      db.createFinding({
+        id: 'F-hi',
+        service: 'svc-a',
+        severity: 'high',
+        summary: 'High issue',
+        reportedBy: 'alice',
+        timestamp: 1000,
+      });
+      db.createFinding({
+        id: 'F-lo',
+        service: 'svc-b',
+        severity: 'low',
+        summary: 'Low issue',
+        reportedBy: 'alice',
+        timestamp: 2000,
+      });
+
+      const high = db.getFindings({ severity: 'high' });
+      expect(high.every((f) => f.severity === 'high')).toBe(true);
+
+      const low = db.getFindings({ severity: 'low' });
+      expect(low.every((f) => f.severity === 'low')).toBe(true);
+    });
+
+    it('filters by service', () => {
+      db.createFinding({
+        id: 'F-svc1',
+        service: 'payment',
+        severity: 'medium',
+        summary: 'Payment issue',
+        reportedBy: 'alice',
+        timestamp: 1000,
+      });
+      db.createFinding({
+        id: 'F-svc2',
+        service: 'order',
+        severity: 'medium',
+        summary: 'Order issue',
+        reportedBy: 'alice',
+        timestamp: 2000,
+      });
+
+      const payment = db.getFindings({ service: 'payment' });
+      expect(payment.every((f) => f.service === 'payment')).toBe(true);
+    });
+
+    it('filters by both severity and service', () => {
+      db.createFinding({
+        id: 'F-both1',
+        service: 'kit',
+        severity: 'high',
+        summary: 'Kit high',
+        reportedBy: 'alice',
+        timestamp: 1000,
+      });
+      db.createFinding({
+        id: 'F-both2',
+        service: 'kit',
+        severity: 'low',
+        summary: 'Kit low',
+        reportedBy: 'alice',
+        timestamp: 2000,
+      });
+      db.createFinding({
+        id: 'F-both3',
+        service: 'order',
+        severity: 'high',
+        summary: 'Order high',
+        reportedBy: 'alice',
+        timestamp: 3000,
+      });
+
+      const result = db.getFindings({ severity: 'high', service: 'kit' });
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('F-both1');
+    });
+
+    it('returns empty array when no findings match', () => {
+      expect(db.getFindings({ severity: 'critical' })).toHaveLength(0);
+    });
+
+    it('links finding to task', () => {
+      db.createFinding({
+        id: 'F-linked',
+        service: 'payment',
+        severity: 'high',
+        summary: 'Linked finding',
+        taskId: 'T-abc123',
+        reportedBy: 'alice',
+        timestamp: 1000,
+      });
+
+      const findings = db.getFindings();
+      const f = findings.find((f) => f.id === 'F-linked');
+      expect(f!.taskId).toBe('T-abc123');
+    });
+
+    it('returns findings ordered by timestamp DESC', () => {
+      db.createFinding({
+        id: 'F-old',
+        service: 'svc',
+        severity: 'info',
+        summary: 'Old',
+        reportedBy: 'alice',
+        timestamp: 100,
+      });
+      db.createFinding({
+        id: 'F-new',
+        service: 'svc',
+        severity: 'info',
+        summary: 'New',
+        reportedBy: 'alice',
+        timestamp: 200,
+      });
+
+      const findings = db.getFindings();
+      const oldIdx = findings.findIndex((f) => f.id === 'F-old');
+      const newIdx = findings.findIndex((f) => f.id === 'F-new');
+      expect(newIdx).toBeLessThan(oldIdx);
+    });
+  });
 });

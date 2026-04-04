@@ -45,6 +45,10 @@ export type HubMessage =
   | { kind: 'vars_list'; vars: Array<{ key: string; value: string; setBy: string }> }
   | { kind: 'activity_log_request'; limit?: number }
   | { kind: 'activity_log'; entries: Array<{ timestamp: number; actor: string; action: string; detail?: string }> }
+  | { kind: 'finding_submit'; finding: Finding }
+  | { kind: 'finding_broadcast'; finding: Finding }
+  | { kind: 'findings_request'; severity?: FindingSeverity; service?: string }
+  | { kind: 'findings_list'; findings: Finding[] }
   | { kind: 'error'; message: string };
 
 export interface WorkspaceInfo {
@@ -72,9 +76,32 @@ export interface TaskItem {
   priority?: TaskPriority;
   assignee?: string;
   dependsOn?: string[]; // task IDs that must complete first
+  result?: string; // outcome/findings when task is done
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+export interface FindingPattern {
+  pattern: string;
+  count: number;
+  source?: string;
+}
+
+export interface Finding {
+  id: string;
+  service: string;
+  severity: FindingSeverity;
+  summary: string; // what was found — the main content
+  category?: string;
+  count?: number; // generic count (errors, warnings, occurrences, affected records)
+  patterns?: FindingPattern[];
+  recommendation?: string;
+  taskId?: string; // link to related task
+  reportedBy: string;
+  timestamp: number;
 }
 
 // Workspace config stored locally after create/join

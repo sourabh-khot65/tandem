@@ -115,6 +115,10 @@ export const TOOL_DEFINITIONS = [
           enum: ['open', 'blocked', 'claimed', 'in_progress', 'done'],
           description: 'New status',
         },
+        result: {
+          type: 'string' as const,
+          description: 'Task result/outcome — attach when marking done so findings are queryable from the board',
+        },
       },
       required: ['task_id', 'status'],
     },
@@ -200,6 +204,65 @@ export const TOOL_DEFINITIONS = [
     name: 'intandem_peers',
     description: 'See who is online in the workspace',
     inputSchema: { type: 'object' as const, properties: {} },
+  },
+  {
+    name: 'intandem_finding',
+    description:
+      'Report a structured finding with service, severity, error count, and patterns. Stored persistently and queryable by all peers.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        service: { type: 'string' as const, description: 'Service or component name (e.g., "cep-payment-service")' },
+        severity: {
+          type: 'string' as const,
+          enum: ['critical', 'high', 'medium', 'low', 'info'],
+          description: 'Finding severity',
+        },
+        summary: {
+          type: 'string' as const,
+          description: 'What was found — the main content of the finding',
+        },
+        category: {
+          type: 'string' as const,
+          description: 'Category (e.g., "data_missing", "auth_failure", "thread_leak")',
+        },
+        count: {
+          type: 'number' as const,
+          description: 'Count of occurrences (errors, warnings, affected records, etc.)',
+        },
+        patterns: {
+          type: 'array' as const,
+          description: 'Patterns observed',
+          items: {
+            type: 'object' as const,
+            properties: {
+              pattern: { type: 'string' as const, description: 'Pattern or message observed' },
+              count: { type: 'number' as const, description: 'Number of occurrences' },
+              source: { type: 'string' as const, description: 'Source class/file/component' },
+            },
+            required: ['pattern', 'count'],
+          },
+        },
+        recommendation: { type: 'string' as const, description: 'Suggested action or next step' },
+        task_id: { type: 'string' as const, description: 'Related task ID (links finding to a task)' },
+      },
+      required: ['service', 'severity', 'summary'],
+    },
+  },
+  {
+    name: 'intandem_findings',
+    description: 'Query structured findings. Filter by severity or service. Returns all findings if no filters.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        severity: {
+          type: 'string' as const,
+          enum: ['critical', 'high', 'medium', 'low', 'info'],
+          description: 'Filter by severity',
+        },
+        service: { type: 'string' as const, description: 'Filter by service name' },
+      },
+    },
   },
   {
     name: 'intandem_activity_log',

@@ -20,6 +20,7 @@ function createState(overrides: Partial<ChannelState> = {}): ChannelState {
     pendingBoardResolve: null,
     pendingVarResolve: null,
     pendingActivityResolve: null,
+    pendingFindingsResolve: null,
     stats: {
       connectedAt: 0,
       toolCallCount: 0,
@@ -182,6 +183,15 @@ describe('handleToolCall — connected state', () => {
         const lines = msg.entries.map((e) => `${e.actor}: ${e.action}`);
         state.pendingActivityResolve(`Activity Log:\n${lines.join('\n')}`);
         state.pendingActivityResolve = null;
+      }
+      if (msg.kind === 'findings_list' && state.pendingFindingsResolve) {
+        if (msg.findings.length === 0) {
+          state.pendingFindingsResolve('No findings recorded.');
+        } else {
+          const lines = msg.findings.map((f) => `[${f.id}] [${f.severity.toUpperCase()}] ${f.service}: ${f.summary}`);
+          state.pendingFindingsResolve(`Findings (${msg.findings.length}):\n${lines.join('\n')}`);
+        }
+        state.pendingFindingsResolve = null;
       }
       if (msg.kind === 'auth_ok') {
         state.workspaceName = msg.workspace.name;
@@ -420,6 +430,121 @@ describe('handleToolCall — connected state', () => {
   it('intandem_get_var requires key', async () => {
     const result = await handleToolCall('intandem_get_var', { key: '' }, conn, state);
     expect(getResultText(result)).toContain('required');
+  });
+
+  // ─── Findings ─────────────────────────────────────────────────────
+
+  it('intandem_finding reports a structured finding', async () => {
+    const result = await handleToolCall(
+      'intandem_finding',
+      {
+        service: 'payment-service',
+        severity: 'high',
+        summary: 'Insurance records not found for legacy lab groups',
+        category: 'data_missing',
+        count: 58,
+        patterns: [{ pattern: 'Insurance records not found', count: 58 }],
+        recommendation: 'Investigate V1 data sync',
+      },
+      conn,
+      state,
+    );
+    const text = getResultText(result);
+    expect(text).toContain('[HIGH]');
+    expect(text).toContain('payment-service');
+    expect(text).toContain('58 occurrences');
+    expect(text).toContain('1 pattern(s)');
+  });
+
+  it('intandem_finding requires service, severity, and summary', async () => {
+    const r1 = await handleToolCall('intandem_finding', { service: '', severity: 'high', summary: 'x' }, conn, state);
+    expect(getResultText(r1)).toContain('required');
+
+    const r2 = await handleToolCall('intandem_finding', { service: 'svc', severity: '', summary: 'x' }, conn, state);
+    expect(getResultText(r2)).toContain('required');
+
+    const r3 = await handleToolCall('intandem_finding', { service: 'svc', severity: 'high', summary: '' }, conn, state);
+    expect(getResultText(r3)).toContain('required');
+  });
+
+  it('intandem_finding links to task', async () => {
+    const result = await handleToolCall(
+      'intandem_finding',
+      { service: 'kit', severity: 'medium', summary: 'BioTouch API issue', task_id: 'T-xyz' },
+      conn,
+      state,
+    );
+    expect(getResultText(result)).toContain('linked to T-xyz');
+  });
+
+  it('intandem_findings queries findings', async () => {
+    // Submit a finding first
+    await handleToolCall(
+      'intandem_finding',
+      { service: 'auth', severity: 'critical', summary: 'JWKS failing' },
+      conn,
+      state,
+    );
+    await sleep(200);
+
+    const result = await handleToolCall('intandem_findings', {}, conn, state);
+    const text = getResultText(result);
+    expect(text).toContain('Findings');
+    expect(text).toContain('auth');
+  });
+
+  it('intandem_findings filters by severity', async () => {
+    await handleToolCall('intandem_finding', { service: 'svc1', severity: 'info', summary: 'Info thing' }, conn, state);
+    await sleep(200);
+
+    const result = await handleToolCall('intandem_findings', { severity: 'info' }, conn, state);
+    expect(getResultText(result)).toContain('INFO');
+  });
+
+  // ─── Task Results ──────────────────────────────────────────────────
+
+  it('intandem_update_task attaches result on done', async () => {
+    await handleToolCall('intandem_add_task', { title: 'Result task' }, conn, state);
+    await sleep(100);
+
+    const boardResult = await handleToolCall('intandem_board', {}, conn, state);
+    const match = getResultText(boardResult).match(/\[(T-[0-9a-f]+)\]/);
+    expect(match).not.toBeNull();
+
+    await handleToolCall('intandem_claim_task', { task_id: match![1] }, conn, state);
+    await sleep(100);
+
+    const result = await handleToolCall(
+      'intandem_update_task',
+      { task_id: match![1], status: 'done', result: 'Fixed the issue by updating pool config' },
+      conn,
+      state,
+    );
+    expect(getResultText(result)).toContain('done');
+    expect(getResultText(result)).toContain('result attached');
+  });
+
+  it('intandem_board shows task results', async () => {
+    await handleToolCall('intandem_add_task', { title: 'Board result task' }, conn, state);
+    await sleep(100);
+
+    const boardResult = await handleToolCall('intandem_board', {}, conn, state);
+    const match = getResultText(boardResult).match(/\[(T-[0-9a-f]+)\].*Board result task/);
+    expect(match).not.toBeNull();
+
+    await handleToolCall('intandem_claim_task', { task_id: match![1] }, conn, state);
+    await sleep(100);
+    await handleToolCall(
+      'intandem_update_task',
+      { task_id: match![1], status: 'done', result: 'Pool config updated to 20 connections' },
+      conn,
+      state,
+    );
+    await sleep(100);
+
+    const board2 = await handleToolCall('intandem_board', {}, conn, state);
+    const text = getResultText(board2);
+    expect(text).toContain('Result: Pool config updated to 20 connections');
   });
 
   // ─── Activity Log ──────────────────────────────────────────────────

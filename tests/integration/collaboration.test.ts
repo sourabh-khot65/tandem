@@ -738,3 +738,279 @@ describe('security', () => {
     w2.close();
   });
 });
+
+// ─── Task Results ────────────────────────────────────────────────────
+
+describe('task results', () => {
+  it('attaches result when completing a task', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w2, 200);
+
+    // Create and claim task
+    sendMsg(w1, {
+      kind: 'board_update',
+      task: { id: 'T-result', title: 'Review logs', status: 'open', createdBy: 'Alice', createdAt: 1, updatedAt: 1 },
+    });
+    await sleep(100);
+    sendMsg(w1, {
+      kind: 'board_update',
+      task: {
+        id: 'T-result',
+        title: '',
+        status: 'claimed',
+        assignee: 'Alice',
+        createdBy: '',
+        createdAt: 0,
+        updatedAt: Date.now(),
+      },
+    });
+    await sleep(100);
+
+    // Complete with result
+    const updatePromise = waitFor(
+      w2,
+      (m) => m.kind === 'board_update' && (m as any).task.id === 'T-result' && (m as any).task.result,
+    );
+    sendMsg(w1, {
+      kind: 'board_update',
+      task: {
+        id: 'T-result',
+        title: '',
+        status: 'done',
+        result: '58 insurance records missing from V1 sync',
+        createdBy: '',
+        createdAt: 0,
+        updatedAt: Date.now(),
+      },
+    });
+    const update = await updatePromise;
+    if (update.kind === 'board_update') {
+      expect(update.task.result).toBe('58 insurance records missing from V1 sync');
+      expect(update.task.status).toBe('done');
+    }
+
+    // Verify result persists on board
+    const boardPromise = waitFor(w1, (m) => m.kind === 'board');
+    sendMsg(w1, { kind: 'board', tasks: [] });
+    const board = await boardPromise;
+    if (board.kind === 'board') {
+      const task = board.tasks.find((t) => t.id === 'T-result');
+      expect(task!.result).toBe('58 insurance records missing from V1 sync');
+    }
+
+    w1.close();
+    w2.close();
+  });
+});
+
+// ─── Structured Findings ─────────────────────────────────────────────
+
+describe('structured findings', () => {
+  it('submits a finding and broadcasts to peers', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 200);
+    await collect(w2, 200);
+
+    const broadcastPromise = waitFor(w1, (m) => m.kind === 'finding_broadcast');
+    sendMsg(w2, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-test01',
+        service: 'payment-service',
+        severity: 'high',
+        summary: 'Insurance records not found for legacy lab groups',
+        category: 'data_missing',
+        count: 58,
+        patterns: [{ pattern: 'Insurance records not found', count: 58, source: 'LegacyInsuranceServiceImpl' }],
+        recommendation: 'Investigate V1 data sync gap',
+        reportedBy: 'Bob',
+        timestamp: Date.now(),
+      },
+    });
+
+    const broadcast = await broadcastPromise;
+    expect(broadcast.kind).toBe('finding_broadcast');
+    if (broadcast.kind === 'finding_broadcast') {
+      expect(broadcast.finding.service).toBe('payment-service');
+      expect(broadcast.finding.severity).toBe('high');
+      expect(broadcast.finding.summary).toBe('Insurance records not found for legacy lab groups');
+      expect(broadcast.finding.count).toBe(58);
+      expect(broadcast.finding.reportedBy).toBe('Bob'); // hub enforces identity
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('queries findings without filters', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    await collect(w1, 100);
+
+    // Submit two findings
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-q1',
+        service: 'auth',
+        severity: 'critical',
+        summary: 'JWKS resolution failing',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-q2',
+        service: 'payment',
+        severity: 'high',
+        summary: 'Insurance records missing',
+        count: 58,
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    await sleep(200);
+
+    const listPromise = waitFor(w1, (m) => m.kind === 'findings_list');
+    sendMsg(w1, { kind: 'findings_request' });
+    const list = await listPromise;
+
+    if (list.kind === 'findings_list') {
+      expect(list.findings.length).toBeGreaterThanOrEqual(2);
+    }
+    w1.close();
+  });
+
+  it('filters findings by severity', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    await collect(w1, 100);
+
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-sev1',
+        service: 'svc',
+        severity: 'critical',
+        summary: 'Critical thing',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-sev2',
+        service: 'svc',
+        severity: 'low',
+        summary: 'Minor thing',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    await sleep(200);
+
+    const listPromise = waitFor(w1, (m) => m.kind === 'findings_list');
+    sendMsg(w1, { kind: 'findings_request', severity: 'critical' });
+    const list = await listPromise;
+
+    if (list.kind === 'findings_list') {
+      expect(list.findings.every((f) => f.severity === 'critical')).toBe(true);
+    }
+    w1.close();
+  });
+
+  it('filters findings by service', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    await collect(w1, 100);
+
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-fs1',
+        service: 'kit',
+        severity: 'high',
+        summary: 'Kit issue',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-fs2',
+        service: 'order',
+        severity: 'high',
+        summary: 'Order issue',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    await sleep(200);
+
+    const listPromise = waitFor(w1, (m) => m.kind === 'findings_list');
+    sendMsg(w1, { kind: 'findings_request', service: 'kit' });
+    const list = await listPromise;
+
+    if (list.kind === 'findings_list') {
+      expect(list.findings.every((f) => f.service === 'kit')).toBe(true);
+    }
+    w1.close();
+  });
+
+  it('enforces reporter identity', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 200);
+
+    const broadcastPromise = waitFor(w1, (m) => m.kind === 'finding_broadcast');
+    sendMsg(w2, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-spoof',
+        service: 'svc',
+        severity: 'info',
+        summary: 'Spoofed reporter',
+        reportedBy: 'FakeUser', // try to spoof
+        timestamp: Date.now(),
+      },
+    });
+    const broadcast = await broadcastPromise;
+    if (broadcast.kind === 'finding_broadcast') {
+      expect(broadcast.finding.reportedBy).toBe('Bob'); // hub enforces real identity
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('links finding to task', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    await collect(w1, 100);
+
+    sendMsg(w1, {
+      kind: 'finding_submit',
+      finding: {
+        id: 'F-link',
+        service: 'payment',
+        severity: 'high',
+        summary: 'Linked to task',
+        taskId: 'T-abc123',
+        reportedBy: 'Alice',
+        timestamp: Date.now(),
+      },
+    });
+    await sleep(200);
+
+    const listPromise = waitFor(w1, (m) => m.kind === 'findings_list');
+    sendMsg(w1, { kind: 'findings_request' });
+    const list = await listPromise;
+
+    if (list.kind === 'findings_list') {
+      const f = list.findings.find((f) => f.id === 'F-link');
+      expect(f).toBeDefined();
+      expect(f!.taskId).toBe('T-abc123');
+    }
+    w1.close();
+  });
+});

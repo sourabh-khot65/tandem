@@ -238,6 +238,12 @@ export class TandemHub {
         case 'activity_log_request':
           this.send(ws, { kind: 'activity_log', entries: workspace.db.getActivityLog(msg.limit ?? 30) });
           break;
+        case 'finding_submit':
+          this.handleFindingSubmit(ws, workspace, peerUsername, msg.finding);
+          break;
+        case 'findings_request':
+          this.handleFindingsRequest(ws, workspace, msg.severity, msg.service);
+          break;
         case 'var_set':
           this.handleVarSet(ws, workspace, peerUsername, msg.key, msg.value);
           break;
@@ -552,7 +558,7 @@ export class TandemHub {
 
       // Only update fields that have meaningful values (non-empty strings)
       const updates: Partial<
-        Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description' | 'priority' | 'dependsOn'>
+        Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description' | 'priority' | 'dependsOn' | 'result'>
       > = {
         status: task.status,
       };
@@ -561,6 +567,7 @@ export class TandemHub {
       if (task.description !== undefined) updates.description = task.description;
       if (task.priority) updates.priority = task.priority;
       if (task.dependsOn) updates.dependsOn = task.dependsOn;
+      if (task.result !== undefined) updates.result = task.result;
       const updated = workspace.db.updateTask(task.id, updates);
       if (updated) {
         workspace.db.logActivity(
@@ -654,6 +661,42 @@ export class TandemHub {
         value: result?.value ?? null,
         setBy: result?.setBy,
       });
+    }
+  }
+
+  private handleFindingSubmit(
+    ws: WebSocket,
+    workspace: Workspace,
+    from: string,
+    finding: import('../shared/types.js').Finding,
+  ): void {
+    try {
+      finding.reportedBy = from; // enforce identity
+      workspace.db.createFinding(finding);
+      workspace.db.logActivity(
+        from,
+        'finding',
+        `[${finding.severity.toUpperCase()}] ${finding.service}: ${finding.category ?? finding.patterns?.[0]?.pattern ?? 'reported'}`,
+      );
+      this.broadcastToWorkspace(workspace, { kind: 'finding_broadcast', finding });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleFindingsRequest(
+    ws: WebSocket,
+    workspace: Workspace,
+    severity?: import('../shared/types.js').FindingSeverity,
+    service?: string,
+  ): void {
+    try {
+      const findings = workspace.db.getFindings({ severity, service });
+      this.send(ws, { kind: 'findings_list', findings });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
     }
   }
 

@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import type { TaskItem } from '../shared/types.js';
+import type { TaskItem, Finding, FindingSeverity } from '../shared/types.js';
 
 const DATA_DIR = join(homedir(), '.tandem', 'data');
 
@@ -14,6 +14,7 @@ interface TaskRow {
   priority: string | null;
   assignee: string | null;
   depends_on: string | null;
+  result: string | null;
   created_by: string;
   created_at: number;
   updated_at: number;
@@ -37,6 +38,7 @@ function rowToTask(row: TaskRow): TaskItem {
     priority: (row.priority as TaskItem['priority']) ?? undefined,
     assignee: row.assignee ?? undefined,
     dependsOn: row.depends_on ? JSON.parse(row.depends_on) : undefined,
+    result: row.result ?? undefined,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -66,6 +68,7 @@ export class TandemDB {
         priority TEXT DEFAULT 'medium',
         assignee TEXT,
         depends_on TEXT,
+        result TEXT,
         created_by TEXT NOT NULL,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -88,6 +91,20 @@ export class TandemDB {
         detail TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS findings (
+        id TEXT PRIMARY KEY,
+        service TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        category TEXT,
+        count INTEGER,
+        patterns TEXT,
+        recommendation TEXT,
+        task_id TEXT,
+        reported_by TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS vars (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -100,8 +117,8 @@ export class TandemDB {
   createTask(task: TaskItem): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, title, description, status, priority, assignee, depends_on, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, title, description, status, priority, assignee, depends_on, result, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -111,6 +128,7 @@ export class TandemDB {
         task.priority ?? 'medium',
         task.assignee ?? null,
         task.dependsOn ? JSON.stringify(task.dependsOn) : null,
+        task.result ?? null,
         task.createdBy,
         task.createdAt,
         task.updatedAt,
@@ -119,7 +137,9 @@ export class TandemDB {
 
   updateTask(
     id: string,
-    updates: Partial<Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description' | 'priority' | 'dependsOn'>>,
+    updates: Partial<
+      Pick<TaskItem, 'status' | 'assignee' | 'title' | 'description' | 'priority' | 'dependsOn' | 'result'>
+    >,
   ): TaskItem | null {
     const task = this.getTask(id);
     if (!task) return null;
@@ -151,6 +171,10 @@ export class TandemDB {
     if (updates.dependsOn !== undefined) {
       sets.push('depends_on = ?');
       values.push(updates.dependsOn ? JSON.stringify(updates.dependsOn) : null);
+    }
+    if (updates.result !== undefined) {
+      sets.push('result = ?');
+      values.push(updates.result);
     }
 
     if (sets.length === 0) return task;
@@ -254,6 +278,74 @@ export class TandemDB {
       updated_at: number;
     }>;
     return rows.map((r) => ({ key: r.key, value: r.value, setBy: r.set_by, updatedAt: r.updated_at }));
+  }
+
+  createFinding(finding: Finding): void {
+    this.db
+      .prepare(
+        `INSERT INTO findings (id, service, severity, summary, category, count, patterns, recommendation, task_id, reported_by, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        finding.id,
+        finding.service,
+        finding.severity,
+        finding.summary,
+        finding.category ?? null,
+        finding.count ?? null,
+        finding.patterns ? JSON.stringify(finding.patterns) : null,
+        finding.recommendation ?? null,
+        finding.taskId ?? null,
+        finding.reportedBy,
+        finding.timestamp,
+      );
+  }
+
+  getFindings(filters?: { severity?: FindingSeverity; service?: string }): Finding[] {
+    let sql = 'SELECT * FROM findings';
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+
+    if (filters?.severity) {
+      conditions.push('severity = ?');
+      values.push(filters.severity);
+    }
+    if (filters?.service) {
+      conditions.push('service = ?');
+      values.push(filters.service);
+    }
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY timestamp DESC';
+
+    const rows = this.db.prepare(sql).all(...values) as Array<{
+      id: string;
+      service: string;
+      severity: string;
+      summary: string;
+      category: string | null;
+      count: number | null;
+      patterns: string | null;
+      recommendation: string | null;
+      task_id: string | null;
+      reported_by: string;
+      timestamp: number;
+    }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      service: r.service,
+      severity: r.severity as FindingSeverity,
+      summary: r.summary,
+      category: r.category ?? undefined,
+      count: r.count ?? undefined,
+      patterns: r.patterns ? JSON.parse(r.patterns) : undefined,
+      recommendation: r.recommendation ?? undefined,
+      taskId: r.task_id ?? undefined,
+      reportedBy: r.reported_by,
+      timestamp: r.timestamp,
+    }));
   }
 
   close(): void {

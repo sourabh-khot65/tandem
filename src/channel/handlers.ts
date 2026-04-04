@@ -10,7 +10,7 @@ import {
   clearWorkspaceConfig,
   findLocalHubConfig,
 } from '../shared/config.js';
-import type { PeerMessage, MessageType, TaskItem, CodeReference } from '../shared/types.js';
+import type { PeerMessage, MessageType, TaskItem, CodeReference, Finding, FindingSeverity } from '../shared/types.js';
 import type { Tunnel } from 'localtunnel';
 import localtunnel from 'localtunnel';
 import { HubConnection } from './connection.js';
@@ -44,6 +44,7 @@ export interface ChannelState {
   pendingBoardResolve: ((tasks: TaskItem[]) => void) | null;
   pendingVarResolve: ((result: string) => void) | null;
   pendingActivityResolve: ((result: string) => void) | null;
+  pendingFindingsResolve: ((result: string) => void) | null;
   stats: SessionStats;
 }
 
@@ -213,6 +214,10 @@ export async function handleToolCall(
       return handlePlan(args, conn, state);
     case 'intandem_share':
       return handleShare(args, conn, state);
+    case 'intandem_finding':
+      return handleFinding(args, conn, state);
+    case 'intandem_findings':
+      return handleFindings(args, conn, state);
     case 'intandem_set_var':
       return handleSetVar(args, conn, state);
     case 'intandem_get_var':
@@ -511,7 +516,8 @@ async function handleBoard(conn: HubConnection, state: ChannelState): Promise<To
   const lines = tasks.map((t) => {
     const pri = t.priority && t.priority !== 'medium' ? ` [${t.priority.toUpperCase()}]` : '';
     const deps = t.dependsOn && t.dependsOn.length > 0 ? ` (depends on: ${t.dependsOn.join(', ')})` : '';
-    return `[${t.id}] ${t.status.toUpperCase()}${pri} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${deps}${t.description ? `\n    ${t.description}` : ''}`;
+    const res = t.result ? `\n    Result: ${t.result}` : '';
+    return `[${t.id}] ${t.status.toUpperCase()}${pri} - ${t.title}${t.assignee ? ` (${t.assignee})` : ''}${deps}${t.description ? `\n    ${t.description}` : ''}${res}`;
   });
   return text('Shared Task Board:\n' + lines.join('\n'));
 }
@@ -576,17 +582,19 @@ function handleUnclaimTask(args: Record<string, unknown>, conn: HubConnection, s
 function handleUpdateTask(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
   if (!conn.connected) return text('Not connected. Create or join a workspace first.');
   const status = args.status as TaskItem['status'];
+  const result = args.result as string | undefined;
   const task: TaskItem = {
     id: args.task_id as string,
     title: '',
     status,
+    result,
     createdBy: '',
     createdAt: 0,
     updatedAt: Date.now(),
   };
   conn.send({ kind: 'board_update', task });
   if (status === 'done') state.stats.tasksCompleted++;
-  return text(`Updated task ${args.task_id} → ${status}`);
+  return text(`Updated task ${args.task_id} → ${status}${result ? ' (result attached)' : ''}`);
 }
 
 function handlePlan(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
@@ -684,6 +692,59 @@ function handleShare(args: Record<string, unknown>, conn: HubConnection, state: 
   conn.send({ kind: 'message', payload });
   const target = args.to ? `to ${args.to}` : 'to all peers';
   return text(`Shared ${file}${startLine ? `:${startLine}-${endLine ?? ''}` : ''} ${target}`);
+}
+
+function handleFinding(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const service = args.service as string;
+  const severity = args.severity as FindingSeverity;
+  const summary = args.summary as string;
+  if (!service || !severity || !summary) return text('service, severity, and summary are required.');
+
+  const finding: Finding = {
+    id: `F-${randomBytes(3).toString('hex')}`,
+    service,
+    severity,
+    summary,
+    category: args.category as string | undefined,
+    count: args.count as number | undefined,
+    patterns: args.patterns as Finding['patterns'],
+    recommendation: args.recommendation as string | undefined,
+    taskId: args.task_id as string | undefined,
+    reportedBy: state.myUsername,
+    timestamp: Date.now(),
+  };
+
+  conn.send({ kind: 'finding_submit', finding });
+
+  const parts = [`Reported [${severity.toUpperCase()}] finding for ${service}`];
+  if (finding.count) parts.push(`${finding.count} occurrences`);
+  if (finding.patterns?.length) parts.push(`${finding.patterns.length} pattern(s)`);
+  if (finding.taskId) parts.push(`linked to ${finding.taskId}`);
+  return text(parts.join(' | '));
+}
+
+async function handleFindings(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+
+  return new Promise((resolve) => {
+    state.pendingFindingsResolve = (result: string) => resolve(text(result));
+    conn.send({
+      kind: 'findings_request',
+      severity: args.severity as FindingSeverity | undefined,
+      service: args.service as string | undefined,
+    });
+    setTimeout(() => {
+      if (state.pendingFindingsResolve) {
+        state.pendingFindingsResolve = null;
+        resolve(text('Timed out waiting for findings.'));
+      }
+    }, 3000);
+  });
 }
 
 function handleSetVar(args: Record<string, unknown>, conn: HubConnection, state: ChannelState): ToolResult {

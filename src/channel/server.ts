@@ -71,6 +71,7 @@ Planning: intandem_plan (create + assign multiple tasks at once)
 Board: intandem_board, intandem_add_task, intandem_claim_task, intandem_unclaim_task, intandem_update_task
 Comms: intandem_send (types: finding, task, question, status, handoff, review, chat, context)
 Sharing: intandem_share (share a file/snippet with peers — includes actual code content)
+Findings: intandem_finding (report structured finding), intandem_findings (query/filter findings)
 Context: intandem_set_var / intandem_get_var (shared workspace variables for config, IDs, etc.)
 Info: intandem_peers, intandem_leave
 
@@ -99,6 +100,7 @@ export async function startChannelServer(): Promise<void> {
     pendingBoardResolve: null,
     pendingVarResolve: null,
     pendingActivityResolve: null,
+    pendingFindingsResolve: null,
     stats: {
       connectedAt: 0,
       toolCallCount: 0,
@@ -328,6 +330,59 @@ export async function startChannelServer(): Promise<void> {
             state.pendingActivityResolve(`Activity Log:\n${lines.join('\n')}`);
           }
           state.pendingActivityResolve = null;
+        }
+        break;
+
+      case 'finding_broadcast': {
+        const f = msg.finding;
+        const patternSummary = f.patterns?.map((p) => `${p.pattern} (${p.count}x)`).join(', ') ?? '';
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `[${f.severity.toUpperCase()}] ${f.service}: ${f.summary}${f.count ? ` (${f.count})` : ''}${patternSummary ? `\n  Patterns: ${patternSummary}` : ''}${f.recommendation ? `\n  Recommendation: ${f.recommendation}` : ''}\n  Reported by: ${f.reportedBy}`,
+            meta: { type: 'finding', event: 'finding', severity: f.severity, service: f.service },
+          },
+        });
+        break;
+      }
+
+      case 'findings_list':
+        if (state.pendingFindingsResolve) {
+          if (msg.findings.length === 0) {
+            state.pendingFindingsResolve('No findings recorded.');
+          } else {
+            const sevOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+            const sorted = [...msg.findings].sort((a, b) => (sevOrder[a.severity] ?? 4) - (sevOrder[b.severity] ?? 4));
+            const lines = sorted.map((f) => {
+              let line = `[${f.id}] [${f.severity.toUpperCase()}] ${f.service}: ${f.summary}`;
+              if (f.category) line += ` [${f.category}]`;
+              if (f.count) line += ` (${f.count})`;
+              if (f.patterns?.length) {
+                line += '\n    Patterns: ' + f.patterns.map((p) => `${p.pattern} (${p.count}x)`).join(', ');
+              }
+              if (f.recommendation) line += `\n    Recommendation: ${f.recommendation}`;
+              if (f.taskId) line += `\n    Task: ${f.taskId}`;
+              line += `\n    By: ${f.reportedBy}`;
+              return line;
+            });
+
+            // Summary
+            const bySev: Record<string, number> = {};
+            for (const f of msg.findings) {
+              bySev[f.severity] = (bySev[f.severity] ?? 0) + 1;
+            }
+            const summary = Object.entries(bySev)
+              .sort(
+                ([a], [b]) => (sevOrder[a as keyof typeof sevOrder] ?? 4) - (sevOrder[b as keyof typeof sevOrder] ?? 4),
+              )
+              .map(([s, c]) => `${s}: ${c}`)
+              .join(', ');
+
+            state.pendingFindingsResolve(
+              `Findings (${msg.findings.length} total — ${summary}):\n\n${lines.join('\n\n')}`,
+            );
+          }
+          state.pendingFindingsResolve = null;
         }
         break;
 
