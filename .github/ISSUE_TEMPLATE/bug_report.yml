@@ -1,0 +1,60 @@
+name: Bug Report
+description: Something isn't working as expected
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. The more detail you provide, the faster we can fix it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug. Include error messages if any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the issue
+      placeholder: |
+        1. Create workspace with `intandem_create`
+        2. Join from second session with `intandem_join`
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Connection / Tunnel
+        - Task Board
+        - Messaging
+        - Findings
+        - Variables
+        - Encryption
+        - CLI (init, whoami, rename)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, InTandem version
+      placeholder: |
+        macOS 15.2, Node 22.0, InTandem 0.1.0
+    validations:
+      required: false
