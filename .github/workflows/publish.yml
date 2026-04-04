@@ -18,7 +18,7 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
-      - run: npm ci
+      - run: npm install
       - run: npm run lint
       - run: npm test
       - run: npm publish --access public --provenance
