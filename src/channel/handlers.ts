@@ -11,8 +11,7 @@ import {
   findLocalHubConfig,
 } from '../shared/config.js';
 import type { PeerMessage, MessageType, TaskItem, CodeReference, Finding, FindingSeverity } from '../shared/types.js';
-import type { Tunnel } from 'localtunnel';
-import localtunnel from 'localtunnel';
+import { openTunnel, type TunnelHandle } from '../shared/tunnel.js';
 import { HubConnection } from './connection.js';
 import { VALID_TYPES } from './tools.js';
 
@@ -35,7 +34,7 @@ export interface SessionStats {
 
 export interface ChannelState {
   hub: TandemHub | null;
-  tunnel: Tunnel | null;
+  tunnel: TunnelHandle | null;
   currentPeers: string[];
   workspaceName: string;
   myUsername: string;
@@ -108,7 +107,7 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
     if (ok) {
       state.inviteCode = generateInviteCode();
       conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
-      const tunnelUrl = (state.tunnel as Tunnel | null)?.url;
+      const tunnelUrl = (state.tunnel as TunnelHandle | null)?.url;
       const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
       process.stderr.write(`[intandem] Promoted to hub owner for "${config.workspaceName}"\n`);
       return { ok: true, joinCode: shortInvite };
@@ -126,7 +125,7 @@ const TUNNEL_RETRY_DELAY = 5_000;
 
 async function setupTunnel(port: number, state: ChannelState, conn: HubConnection, retryCount = 0): Promise<void> {
   try {
-    state.tunnel = await localtunnel({ port });
+    state.tunnel = await openTunnel(port);
     process.stderr.write(`[intandem] Tunnel open: ${state.tunnel.url}\n`);
 
     if (retryCount > 0 && conn.connected) {
@@ -267,7 +266,7 @@ async function handleCreate(
   let tunnelUrl = '';
   try {
     await setupTunnel(port, state, conn);
-    tunnelUrl = (state.tunnel as Tunnel | null)?.url ?? '';
+    tunnelUrl = (state.tunnel as TunnelHandle | null)?.url ?? '';
   } catch {
     process.stderr.write(`[intandem] All tunnel attempts failed, using local-only mode\n`);
   }
