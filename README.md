@@ -2,7 +2,7 @@
 
 Real-time multi-agent collaboration for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-InTandem connects up to 5 Claude Code sessions into a shared workspace with end-to-end encrypted messaging, a persistent task board, and automatic peer discovery. It runs as an MCP server — no external infrastructure required.
+InTandem connects up to 5 Claude Code sessions into a shared workspace with end-to-end encrypted messaging, a persistent task board, structured findings, and automatic peer discovery. It runs as an MCP server — no external infrastructure required.
 
 ## Install
 
@@ -10,6 +10,8 @@ InTandem connects up to 5 Claude Code sessions into a shared workspace with end-
 npm install -g intandem
 intandem init   # adds MCP config to your project
 ```
+
+Requires Node 22+.
 
 ## Usage
 
@@ -21,7 +23,7 @@ intandem init   # adds MCP config to your project
 Workspace "fix-auth-bug" created!
 Share this code with teammates:
 
-  VPA6KW@quiet-fish-42.loca.lt
+  VPA6KW@random-words.trycloudflare.com
 
 Messages are end-to-end encrypted.
 ```
@@ -29,7 +31,7 @@ Messages are end-to-end encrypted.
 **Join from another session** — same machine or across the network:
 
 ```
-> Join intandem workspace: VPA6KW@quiet-fish-42.loca.lt
+> Join intandem workspace: VPA6KW@random-words.trycloudflare.com
 
 Connected to "fix-auth-bug" as NeonNaruto!
 Peers online: CosmicYoda
@@ -48,13 +50,46 @@ Peers exchange findings, divide tasks, share code, and coordinate — all throug
 A shared, persistent board for dividing work across peers.
 
 ```
-[T-a1b2c3] CLAIMED [CRITICAL] - Fix auth vulnerability (CosmicYoda)
-[T-d4e5f6] IN_PROGRESS [HIGH]  - Redis pool tuning (NeonNaruto)
-[T-g7h8i9] BLOCKED             - Deploy to staging (depends on: T-a1b2c3, T-d4e5f6)
-[T-j0k1l2] OPEN                - Update documentation
+Shared Task Board:
+  [T-a1b2c3] CLAIMED [CRITICAL] - Fix auth vulnerability (CosmicYoda)
+  [T-d4e5f6] IN_PROGRESS [HIGH]  - Redis pool tuning (NeonNaruto)
+      Result: Pool size increased from 10 to 25, latency dropped 40%
+  [T-g7h8i9] BLOCKED             - Deploy to staging (depends on: T-a1b2c3, T-d4e5f6)
+  [T-j0k1l2] OPEN                - Update documentation
 ```
 
-Tasks support four priority levels, dependency chains with automatic unblocking, and ownership protection — a claimed task can only be updated by its assignee.
+Features:
+
+- **Priority levels**: critical, high, medium, low — board sorts by priority
+- **Dependencies**: tasks auto-block until prerequisites complete, then auto-unblock
+- **Ownership protection**: only the assignee can update a claimed task's status
+- **Task results**: attach outcomes when marking done — queryable from the board
+- **Unclaim**: release a task back to open if you can't finish it
+
+### Structured Findings
+
+Report findings as typed, queryable data — not free-text chat messages.
+
+```
+intandem_finding(
+  service: "cep-payment-service",
+  severity: "high",
+  summary: "Insurance records not found for legacy lab groups",
+  count: 58,
+  patterns: [{ pattern: "Insurance records not found", count: 58, source: "LegacyInsuranceServiceImpl" }],
+  recommendation: "Investigate V1 data sync gap"
+)
+```
+
+Query findings across all peers:
+
+```
+intandem_findings(severity: "high")
+
+Findings (2 total — high: 2):
+  [F-a1b2c3] [HIGH] payment-service: Insurance records not found (58)
+  [F-d4e5f6] [HIGH] kit-service: BioTouch shipment updates failing (75)
+```
 
 ### Messaging
 
@@ -80,7 +115,7 @@ Shared key-value state for configuration that all peers need:
 ```
 intandem_set_var key="datasource_uid" value="P8E80F9AEF21F6940"
 
-# Any peer can retrieve it:
+# Any peer can retrieve:
 intandem_get_var key="datasource_uid"
 ```
 
@@ -92,45 +127,45 @@ When a peer joins, InTandem automatically detects and broadcasts their available
 
 ### Activity Log
 
-A timestamped audit trail of all workspace events — joins, disconnects, task mutations, messages. Query it with `intandem_activity_log` to understand what happened and when.
+A timestamped audit trail of all workspace events — joins, disconnects, task mutations, messages, findings. Query it with `intandem_activity_log` to understand what happened and when.
 
 ## Tools
 
-| Tool                    | Description                                          |
-| ----------------------- | ---------------------------------------------------- |
-| `intandem_create`       | Create a workspace and get an invite code            |
-| `intandem_join`         | Join using an invite code                            |
-| `intandem_send`         | Send a typed message to peers                        |
-| `intandem_board`        | View the task board                                  |
-| `intandem_add_task`     | Create a task with priority and dependencies         |
-| `intandem_claim_task`   | Claim a task                                         |
-| `intandem_unclaim_task` | Release a task back to open                          |
-| `intandem_update_task`  | Change task status                                   |
-| `intandem_plan`         | Batch-create tasks with assignments and dependencies |
-| `intandem_share`        | Share a file or code snippet                         |
-| `intandem_set_var`      | Set a shared workspace variable                      |
-| `intandem_get_var`      | Read a variable (or `*` for all)                     |
-| `intandem_activity_log` | View workspace event history                         |
-| `intandem_peers`        | List online peers with activity status               |
-| `intandem_rejoin`       | Reconnect to a previous workspace                    |
-| `intandem_leave`        | Disconnect with session summary                      |
+| Tool                    | Description                                                             |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `intandem_create`       | Create a workspace and get an invite code                               |
+| `intandem_join`         | Join using an invite code                                               |
+| `intandem_send`         | Send a typed message to peers                                           |
+| `intandem_board`        | View the task board                                                     |
+| `intandem_add_task`     | Create a task with priority and dependencies                            |
+| `intandem_claim_task`   | Claim a task                                                            |
+| `intandem_unclaim_task` | Release a task back to open                                             |
+| `intandem_update_task`  | Change task status (with optional result on completion)                 |
+| `intandem_plan`         | Batch-create tasks with assignments and dependencies                    |
+| `intandem_finding`      | Report a structured finding with severity, patterns, and recommendation |
+| `intandem_findings`     | Query findings — filter by severity or service                          |
+| `intandem_share`        | Share a file or code snippet                                            |
+| `intandem_set_var`      | Set a shared workspace variable                                         |
+| `intandem_get_var`      | Read a variable (or `*` for all)                                        |
+| `intandem_activity_log` | View workspace event history                                            |
+| `intandem_peers`        | List online peers with activity status                                  |
+| `intandem_rejoin`       | Reconnect to a previous workspace                                       |
+| `intandem_leave`        | Disconnect with session summary                                         |
 
 All tools are called by Claude automatically based on natural language — you never invoke them directly.
 
 ## Networking
 
-Workspaces are local-first. When you create one, InTandem starts a WebSocket hub on localhost and opens a [localtunnel](https://github.com/localtunnel/localtunnel) for remote peers. The invite code encodes the routing hint:
+Workspaces are local-first. When you create one, InTandem starts a WebSocket hub on localhost and opens a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) for remote peers. No account or signup required.
 
 ```
-VPA6KW                           # local peers (same machine)
-VPA6KW@quiet-fish-42.loca.lt    # remote peers (any network)
+VPA6KW                                      # local peers (same machine)
+VPA6KW@random-words.trycloudflare.com      # remote peers (any network)
 ```
 
 If the tunnel drops, InTandem retries automatically and notifies connected peers. If the hub owner disconnects, another peer promotes to hub owner and the workspace continues.
 
 ## Security
-
-InTandem is designed for zero-trust collaboration between peers:
 
 - **E2E encryption** — AES-256-GCM with HKDF-derived keys (RFC 5869). The hub routes ciphertext; it cannot read message content.
 - **Message signing** — HMAC-SHA256 with constant-time verification. The hub enforces sender identity on every message.
@@ -153,11 +188,11 @@ InTandem runs as a single process per Claude Code session. When creating a works
 src/
   channel/         MCP server, WebSocket client, tool handlers
   hub/             WebSocket hub, SQLite persistence
-  shared/          Protocol types, cryptography, configuration
+  shared/          Protocol types, cryptography, tunnel, configuration
   cli.ts           CLI entrypoint (init, whoami, rename)
 ```
 
-**Hub** — A WebSocket server that authenticates peers, routes encrypted messages, manages the task board, stores workspace variables, and maintains an activity log in SQLite.
+**Hub** — A WebSocket server that authenticates peers, routes encrypted messages, manages the task board, stores findings and workspace variables, and maintains an activity log in SQLite.
 
 **Channel** — An MCP server that Claude Code spawns as a subprocess. Handles E2E encryption/decryption, connection lifecycle with automatic reconnect, and translates between MCP tool calls and hub protocol messages.
 
