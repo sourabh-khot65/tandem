@@ -37,7 +37,7 @@ Connected to "fix-auth-bug" as NeonNaruto!
 Peers online: CosmicYoda
 
 CosmicYoda capabilities:
-  MCP servers: grafana-prod, mcp-atlassian
+  MCP servers: postgres-db, redis-cache
   Working directory: /projects/backend
 ```
 
@@ -72,12 +72,12 @@ Report findings as typed, queryable data — not free-text chat messages.
 
 ```
 intandem_finding(
-  service: "cep-payment-service",
+  service: "user-service",
   severity: "high",
-  summary: "Insurance records not found for legacy lab groups",
-  count: 58,
-  patterns: [{ pattern: "Insurance records not found", count: 58, source: "LegacyInsuranceServiceImpl" }],
-  recommendation: "Investigate V1 data sync gap"
+  summary: "Connection pool exhausted under load",
+  count: 42,
+  patterns: [{ pattern: "HikariPool-1 - Connection is not available", count: 42, source: "UserRepository" }],
+  recommendation: "Increase pool size or add connection timeout"
 )
 ```
 
@@ -87,8 +87,8 @@ Query findings across all peers:
 intandem_findings(severity: "high")
 
 Findings (2 total — high: 2):
-  [F-a1b2c3] [HIGH] payment-service: Insurance records not found (58)
-  [F-d4e5f6] [HIGH] kit-service: BioTouch shipment updates failing (75)
+  [F-a1b2c3] [HIGH] user-service: Connection pool exhausted under load (42)
+  [F-d4e5f6] [HIGH] order-service: Retry storm on upstream timeout (120)
 ```
 
 ### Messaging
@@ -113,10 +113,10 @@ All messages include delivery receipts. Directed messages route to a specific pe
 Shared key-value state for configuration that all peers need:
 
 ```
-intandem_set_var key="datasource_uid" value="P8E80F9AEF21F6940"
+intandem_set_var key="db_host" value="prod-db.internal:5432"
 
 # Any peer can retrieve:
-intandem_get_var key="datasource_uid"
+intandem_get_var key="db_host"
 ```
 
 Variables persist for the session and broadcast changes to all peers on update.
