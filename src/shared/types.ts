@@ -72,11 +72,12 @@ export interface TaskItem {
   id: string;
   title: string;
   description?: string;
-  status: 'open' | 'blocked' | 'claimed' | 'in_progress' | 'done';
+  status: 'open' | 'blocked' | 'claimed' | 'in_progress' | 'done' | 'failed';
   priority?: TaskPriority;
   assignee?: string;
   dependsOn?: string[]; // task IDs that must complete first
   result?: string; // outcome/findings when task is done
+  error?: string; // optional error message if task failed
   createdBy: string;
   createdAt: number;
   updatedAt: number;
