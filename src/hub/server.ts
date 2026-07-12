@@ -82,6 +82,22 @@ export class TandemHub {
     return { workspaceId, token };
   }
 
+  registerInviteCode(workspaceId: string, inviteCode: string): void {
+    const workspace = this.workspaces.get(workspaceId);
+    if (workspace) {
+      workspace.inviteCode = inviteCode;
+      this.inviteCodes.set(inviteCode, workspace);
+    }
+  }
+
+  get totalPeerCount(): number {
+    let count = 0;
+    for (const workspace of this.workspaces.values()) {
+      count += workspace.peers.size;
+    }
+    return count;
+  }
+
   /** Adopt an existing workspace (reuses the SQLite DB). Used for hub ownership transfer. */
   adoptWorkspace(workspaceId: string, name: string, token: string, maxPeers = 5): void {
     const workspace: Workspace = {

@@ -12,6 +12,7 @@ import {
   saveUsername,
   loadUsername,
 } from '../shared/config.js';
+import { findRunningHub } from '../shared/hub-lifecycle.js';
 import type { HubMessage } from '../shared/types.js';
 
 import { HubConnection } from './connection.js';
@@ -90,8 +91,7 @@ export async function startChannelServer(): Promise<void> {
   }
 
   const state: ChannelState = {
-    hub: null,
-    tunnel: null,
+    hubDaemonPid: null,
     currentPeers: [],
     workspaceName: '',
     myUsername: username,
@@ -434,7 +434,7 @@ export async function startChannelServer(): Promise<void> {
 
   // When auto-reconnect exhausts all attempts, try to become the new hub
   conn.onReconnectFailed = () => {
-    if (state.hub) return; // we're already the hub, don't promote
+    if (state.hubDaemonPid) return; // we spawned the daemon, don't self-promote
     promoteToHub(conn, state).then((result) => {
       if (result.ok) {
         const lines = [
@@ -485,21 +485,32 @@ export async function startChannelServer(): Promise<void> {
   // --- Start MCP ---
   await mcp.connect(new StdioServerTransport());
 
-  // --- Auto-reconnect if we have a saved config ---
+  // --- Auto-reconnect if we have a saved config or running daemon ---
+  const daemonInfo = findRunningHub();
   const startupConfig = savedConfig ?? findLocalHubConfig();
-  if (startupConfig) {
-    process.stderr.write(`[intandem] Found saved workspace config, reconnecting...\n`);
+  if (daemonInfo || startupConfig) {
+    process.stderr.write(
+      `[intandem] Found ${daemonInfo ? 'running hub daemon' : 'saved workspace config'}, reconnecting...\n`,
+    );
     const urlsToTry: string[] = [];
-    if (startupConfig.localUrl) urlsToTry.push(startupConfig.localUrl);
-    if (startupConfig.hubUrl && startupConfig.hubUrl !== startupConfig.localUrl) urlsToTry.push(startupConfig.hubUrl);
-    const creatorConfig = findLocalHubConfig();
-    if (creatorConfig?.localUrl && !urlsToTry.includes(creatorConfig.localUrl)) {
-      urlsToTry.unshift(creatorConfig.localUrl);
+    if (daemonInfo) urlsToTry.push(daemonInfo.localUrl);
+    if (startupConfig?.localUrl && !urlsToTry.includes(startupConfig.localUrl)) urlsToTry.push(startupConfig.localUrl);
+    if (
+      startupConfig?.hubUrl &&
+      startupConfig.hubUrl !== startupConfig.localUrl &&
+      !urlsToTry.includes(startupConfig.hubUrl)
+    ) {
+      urlsToTry.push(startupConfig.hubUrl);
     }
-    const tokenToUse = startupConfig.token || creatorConfig?.token || '';
-    const usernameToUse = startupConfig.username || state.myUsername;
+    if (!daemonInfo && !startupConfig?.localUrl) {
+      const creatorConfig = findLocalHubConfig();
+      if (creatorConfig?.localUrl && !urlsToTry.includes(creatorConfig.localUrl)) {
+        urlsToTry.unshift(creatorConfig.localUrl);
+      }
+    }
+    const tokenToUse = daemonInfo?.token ?? startupConfig?.token ?? '';
+    const usernameToUse = startupConfig?.username ?? state.myUsername;
 
-    // Set token BEFORE connecting so incoming messages can be decrypted
     if (tokenToUse) {
       state.workspaceToken = tokenToUse;
     }
@@ -513,17 +524,17 @@ export async function startChannelServer(): Promise<void> {
           return;
         }
       }
-      const fallbackUrl = urlsToTry[0] || startupConfig.hubUrl;
-      process.stderr.write(`[intandem] Initial reconnect failed, will retry...\n`);
-      conn.scheduleReconnect(fallbackUrl, tokenToUse, usernameToUse);
+      const fallbackUrl = urlsToTry[0] ?? startupConfig?.hubUrl ?? '';
+      if (fallbackUrl) {
+        process.stderr.write(`[intandem] Initial reconnect failed, will retry...\n`);
+        conn.scheduleReconnect(fallbackUrl, tokenToUse, usernameToUse);
+      }
     })();
   }
 
-  // --- Cleanup ---
+  // --- Cleanup (don't stop daemon — it should survive channel restarts) ---
   process.on('SIGINT', () => {
     conn.cancelReconnect();
-    if (state.tunnel) state.tunnel.close();
-    if (state.hub) state.hub.stop();
     conn.disconnect();
     clearWorkspaceConfig();
     process.exit(0);

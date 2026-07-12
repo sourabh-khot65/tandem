@@ -2,16 +2,15 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import WebSocket from 'ws';
-import { TandemHub } from '../hub/server.js';
-import { parseInvite, createShortInvite, generateInviteCode, encryptMessage, signMessage } from '../shared/crypto.js';
+import { parseInvite, createShortInvite, encryptMessage, signMessage } from '../shared/crypto.js';
 import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
   clearWorkspaceConfig,
   findLocalHubConfig,
 } from '../shared/config.js';
+import { findRunningHub, spawnHub, stopHub } from '../shared/hub-lifecycle.js';
 import type { PeerMessage, MessageType, TaskItem, CodeReference, Finding, FindingSeverity } from '../shared/types.js';
-import { openTunnel, type TunnelHandle } from '../shared/tunnel.js';
 import { HubConnection } from './connection.js';
 import { VALID_TYPES } from './tools.js';
 
@@ -33,8 +32,7 @@ export interface SessionStats {
 }
 
 export interface ChannelState {
-  hub: TandemHub | null;
-  tunnel: TunnelHandle | null;
+  hubDaemonPid: number | null;
   currentPeers: string[];
   workspaceName: string;
   myUsername: string;
@@ -47,68 +45,45 @@ export interface ChannelState {
   stats: SessionStats;
 }
 
-/**
- * Attempt to become the new hub when the original creator disconnects.
- * Starts a new TandemHub using the existing workspace DB, opens a tunnel,
- * and connects as a peer. Returns true if promotion succeeded.
- */
 export interface PromotionResult {
   ok: boolean;
-  joinCode?: string; // new join code for remote peers to reconnect
+  joinCode?: string;
 }
 
 /**
  * Attempt to become the new hub when the original creator disconnects.
- * Starts a new TandemHub using the existing workspace DB, opens a tunnel,
- * and connects as a peer. Returns the new join code so remote peers can reconnect.
+ * Spawns a daemon in adopt mode to reuse the existing workspace DB.
  */
 export async function promoteToHub(conn: HubConnection, state: ChannelState): Promise<PromotionResult> {
   const config = loadWorkspaceConfig();
   if (!config) return { ok: false };
 
-  process.stderr.write(`[intandem] Hub appears dead. Attempting to become new hub for "${config.workspaceName}"...\n`);
-
-  // Clean up old state
+  process.stderr.write(`[intandem] Hub appears dead. Spawning daemon for "${config.workspaceName}"...\n`);
   conn.disconnect();
-  if (state.tunnel) {
-    state.tunnel.close();
-    state.tunnel = null;
-  }
-  if (state.hub) {
-    state.hub.stop();
-    state.hub = null;
-  }
 
   try {
-    state.hub = new TandemHub();
-    state.hub.adoptWorkspace(config.workspaceId, config.workspaceName, config.token, config.maxPeers ?? 5);
-    const { port } = await state.hub.start({ port: 0, host: '127.0.0.1' });
+    const info = await spawnHub({
+      name: config.workspaceName,
+      maxPeers: config.maxPeers ?? 5,
+      adopt: { workspaceId: config.workspaceId, token: config.token },
+    });
+    state.hubDaemonPid = info.pid;
 
-    // Try to open tunnel for remote peers
-    try {
-      await setupTunnel(port, state, conn);
-    } catch {
-      process.stderr.write(`[intandem] Tunnel failed, local-only mode\n`);
-    }
-
-    const localUrl = `ws://127.0.0.1:${port}`;
     saveWorkspaceConfig({
-      hubUrl: localUrl,
-      localUrl,
-      workspaceId: config.workspaceId,
-      token: config.token,
+      hubUrl: info.tunnelUrl ?? info.localUrl,
+      localUrl: info.localUrl,
+      workspaceId: info.workspaceId,
+      token: info.token,
       username: state.myUsername,
       workspaceName: config.workspaceName,
       isCreator: true,
       maxPeers: config.maxPeers ?? 5,
     });
 
-    const ok = await conn.connect(localUrl, config.token, state.myUsername);
+    const ok = await conn.connect(info.localUrl, info.token, state.myUsername);
     if (ok) {
-      state.inviteCode = generateInviteCode();
-      conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
-      const tunnelUrl = (state.tunnel as TunnelHandle | null)?.url;
-      const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
+      state.inviteCode = info.inviteCode;
+      const shortInvite = createShortInvite(state.inviteCode, info.tunnelUrl);
       process.stderr.write(`[intandem] Promoted to hub owner for "${config.workspaceName}"\n`);
       return { ok: true, joinCode: shortInvite };
     }
@@ -118,58 +93,6 @@ export async function promoteToHub(conn: HubConnection, state: ChannelState): Pr
   }
 
   return { ok: false };
-}
-
-const MAX_TUNNEL_RETRIES = 3;
-const TUNNEL_RETRY_DELAY = 5_000;
-
-async function setupTunnel(port: number, state: ChannelState, conn: HubConnection, retryCount = 0): Promise<void> {
-  try {
-    state.tunnel = await openTunnel(port);
-    process.stderr.write(`[intandem] Tunnel open: ${state.tunnel.url}\n`);
-
-    if (retryCount > 0 && conn.connected) {
-      // Notify peers that tunnel is back
-      const payload = buildSignedMessage(state, {
-        type: 'status',
-        content: `Tunnel reconnected. Remote access restored.`,
-      });
-      conn.send({ kind: 'message', payload });
-    }
-
-    state.tunnel.on('close', () => {
-      process.stderr.write('[intandem] Tunnel closed — remote peers may lose access.\n');
-      state.tunnel = null;
-
-      if (conn.connected) {
-        const payload = buildSignedMessage(state, {
-          type: 'status',
-          content: `Tunnel dropped. Remote peers may disconnect. Attempting to reopen...`,
-        });
-        conn.send({ kind: 'message', payload });
-      }
-
-      // Retry with backoff
-      const nextRetry = retryCount + 1;
-      if (nextRetry <= MAX_TUNNEL_RETRIES) {
-        setTimeout(() => {
-          setupTunnel(port, state, conn, nextRetry).catch(() => {
-            process.stderr.write(`[intandem] Tunnel reopen failed after ${nextRetry} attempts — local-only mode\n`);
-          });
-        }, TUNNEL_RETRY_DELAY * nextRetry);
-      } else {
-        process.stderr.write(`[intandem] Tunnel reopen exhausted ${MAX_TUNNEL_RETRIES} retries — local-only mode\n`);
-      }
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`[intandem] Tunnel failed (${message})\n`);
-    if (retryCount < MAX_TUNNEL_RETRIES) {
-      await new Promise((r) => setTimeout(r, TUNNEL_RETRY_DELAY));
-      return setupTunnel(port, state, conn, retryCount + 1);
-    }
-    throw err;
-  }
 }
 
 function waitForBoard(state: ChannelState): Promise<TaskItem[]> {
@@ -244,57 +167,35 @@ async function handleCreate(
   }
   conn.cancelReconnect();
   conn.intentionalLeave = false;
-
-  // Clean up any orphaned hub/tunnel from a previous create
   conn.disconnect();
-  if (state.tunnel) {
-    state.tunnel.close();
-    state.tunnel = null;
-  }
-  if (state.hub) {
-    state.hub.stop();
-    state.hub = null;
-  }
 
   const name = (args.name as string) ?? 'intandem-session';
   const maxPeers = Math.min((args.max_peers as number) ?? 5, 5);
 
-  state.hub = new TandemHub();
-  const { workspaceId, token } = state.hub.createWorkspace(name, maxPeers);
-  const { port } = await state.hub.start({ port: 0, host: '127.0.0.1' });
+  // Spawn hub daemon (detached process that survives MCP reconnects)
+  const info = await spawnHub({ name, maxPeers });
+  state.hubDaemonPid = info.pid;
 
-  let tunnelUrl = '';
-  try {
-    await setupTunnel(port, state, conn);
-    tunnelUrl = (state.tunnel as TunnelHandle | null)?.url ?? '';
-  } catch {
-    process.stderr.write(`[intandem] All tunnel attempts failed, using local-only mode\n`);
-  }
-
-  const localUrl = `ws://127.0.0.1:${port}`;
   saveWorkspaceConfig({
-    hubUrl: localUrl,
-    localUrl,
-    workspaceId,
-    token,
+    hubUrl: info.tunnelUrl ?? info.localUrl,
+    localUrl: info.localUrl,
+    workspaceId: info.workspaceId,
+    token: info.token,
     username: state.myUsername,
     workspaceName: name,
     isCreator: true,
     maxPeers,
   });
 
-  state.workspaceToken = token;
-  state.inviteCode = generateInviteCode();
+  state.workspaceToken = info.token;
+  state.inviteCode = info.inviteCode;
 
-  const ok = await conn.connect(`ws://127.0.0.1:${port}`, token, state.myUsername);
+  const ok = await conn.connect(info.localUrl, info.token, state.myUsername);
   if (!ok) {
-    return text('Failed to connect to hub. Something went wrong.');
+    return text('Failed to connect to hub daemon. Check ~/.tandem/hub.log for details.');
   }
 
-  // Register the short invite code with the hub
-  conn.send({ kind: 'invite_register', inviteCode: state.inviteCode });
-
-  const shortInvite = createShortInvite(state.inviteCode, tunnelUrl);
+  const shortInvite = createShortInvite(state.inviteCode, info.tunnelUrl);
 
   const lines = [
     `Workspace "${name}" created!`,
@@ -307,6 +208,7 @@ async function handleCreate(
     `They just tell their Claude: "Join intandem workspace: ${shortInvite}"`,
     ``,
     `Messages are end-to-end encrypted.`,
+    `Hub runs as a background daemon — survives session restarts.`,
     `Waiting for peers... (0/${maxPeers} slots)`,
   ];
 
@@ -368,16 +270,12 @@ async function handleJoin(
   }
   conn.cancelReconnect();
   conn.intentionalLeave = false;
-
-  // Clean up any orphaned hub/tunnel from a previous session
   conn.disconnect();
-  if (state.tunnel) {
-    state.tunnel.close();
-    state.tunnel = null;
-  }
-  if (state.hub) {
-    state.hub.stop();
-    state.hub = null;
+
+  // Stop any daemon we previously spawned (joining a different workspace)
+  if (state.hubDaemonPid) {
+    stopHub();
+    state.hubDaemonPid = null;
   }
 
   const code = args.code as string;
@@ -832,7 +730,7 @@ function generateSessionSummary(state: ChannelState): string {
 }
 
 function handleLeave(conn: HubConnection, state: ChannelState): ToolResult {
-  if (!conn.connected && !state.hub) return text('Not connected to any workspace.');
+  if (!conn.connected && !state.hubDaemonPid) return text('Not connected to any workspace.');
 
   const summary = generateSessionSummary(state);
 
@@ -841,13 +739,9 @@ function handleLeave(conn: HubConnection, state: ChannelState): ToolResult {
   conn.disconnect();
   state.currentPeers = [];
 
-  if (state.tunnel) {
-    state.tunnel.close();
-    state.tunnel = null;
-  }
-  if (state.hub) {
-    state.hub.stop();
-    state.hub = null;
+  if (state.hubDaemonPid) {
+    stopHub();
+    state.hubDaemonPid = null;
   }
 
   clearWorkspaceConfig();
@@ -861,7 +755,18 @@ async function handleRejoin(conn: HubConnection, state: ChannelState): Promise<T
   conn.cancelReconnect();
   conn.intentionalLeave = false;
 
+  const daemonInfo = findRunningHub();
   let config = loadWorkspaceConfig();
+  if (!config && daemonInfo) {
+    config = {
+      hubUrl: daemonInfo.localUrl,
+      localUrl: daemonInfo.localUrl,
+      workspaceId: daemonInfo.workspaceId,
+      token: daemonInfo.token,
+      username: state.myUsername,
+      workspaceName: daemonInfo.workspaceName,
+    };
+  }
   if (!config) {
     config = findLocalHubConfig();
   }
@@ -872,9 +777,12 @@ async function handleRejoin(conn: HubConnection, state: ChannelState): Promise<T
   }
 
   const urlsToTry: string[] = [];
-  if (config.localUrl) urlsToTry.push(config.localUrl);
-  if (config.hubUrl && config.hubUrl !== config.localUrl) urlsToTry.push(config.hubUrl);
-  if (!config.localUrl) {
+  if (daemonInfo) urlsToTry.push(daemonInfo.localUrl);
+  if (config.localUrl && !urlsToTry.includes(config.localUrl)) urlsToTry.push(config.localUrl);
+  if (config.hubUrl && config.hubUrl !== config.localUrl && !urlsToTry.includes(config.hubUrl)) {
+    urlsToTry.push(config.hubUrl);
+  }
+  if (!config.localUrl && !daemonInfo) {
     const creatorConfig = findLocalHubConfig();
     if (creatorConfig?.localUrl && !urlsToTry.includes(creatorConfig.localUrl)) {
       urlsToTry.unshift(creatorConfig.localUrl);

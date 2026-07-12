@@ -2,6 +2,7 @@
 import { startChannelServer } from './channel/server.js';
 import { generateUsername } from './shared/names.js';
 import { saveUsername, loadUsername, clearWorkspaceConfig, cleanStaleSessions } from './shared/config.js';
+import { findRunningHub, stopHub } from './shared/hub-lifecycle.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -82,6 +83,67 @@ async function cmdChannel(): Promise<void> {
   await startChannelServer();
 }
 
+async function cmdHubDaemon(): Promise<void> {
+  const { parseDaemonArgs, startHubDaemon } = await import('./hub/daemon.js');
+  const daemonArgs = parseDaemonArgs(args.slice(1));
+  await startHubDaemon(daemonArgs);
+}
+
+function cmdHub(): void {
+  const sub = args[1];
+  switch (sub) {
+    case 'status': {
+      const info = findRunningHub();
+      if (!info) {
+        console.log('  No hub daemon running.');
+        return;
+      }
+      const uptime = Math.floor((Date.now() - info.startedAt) / 1000);
+      const uptimeStr =
+        uptime >= 3600
+          ? `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`
+          : uptime >= 60
+            ? `${Math.floor(uptime / 60)}m ${uptime % 60}s`
+            : `${uptime}s`;
+      console.log(`  Hub daemon running (PID ${info.pid})`);
+      console.log(`  Workspace: ${info.workspaceName} (${info.workspaceId})`);
+      console.log(`  Local:     ${info.localUrl}`);
+      console.log(`  Tunnel:    ${info.tunnelUrl ?? 'none (local-only mode)'}`);
+      console.log(`  Uptime:    ${uptimeStr}`);
+      console.log(`  Max peers: ${info.maxPeers}`);
+      break;
+    }
+    case 'stop': {
+      const stopped = stopHub();
+      if (stopped) {
+        console.log('  ✓ Hub daemon stopped.');
+      } else {
+        console.log('  No hub daemon running.');
+      }
+      break;
+    }
+    case 'log':
+    case 'logs': {
+      const logPath = join(process.env.HOME ?? '', '.tandem', 'hub.log');
+      if (!existsSync(logPath)) {
+        console.log('  No hub log file found.');
+        return;
+      }
+      const content = readFileSync(logPath, 'utf-8');
+      const lines = content.split('\n');
+      const tail = lines.slice(-50).join('\n');
+      console.log(tail);
+      break;
+    }
+    default:
+      console.log(`  Usage:`);
+      console.log(`    intandem hub status          Show running hub daemon info`);
+      console.log(`    intandem hub stop            Stop the hub daemon`);
+      console.log(`    intandem hub logs            Show recent hub daemon logs`);
+      break;
+  }
+}
+
 function printHelp(): void {
   printBanner();
   console.log(`  Setup:`);
@@ -89,6 +151,12 @@ function printHelp(): void {
   console.log(`    intandem init                Add InTandem to .mcp.json in current directory`);
   console.log(`    intandem whoami              Show your username`);
   console.log(`    intandem rename <name>       Change your username`);
+  console.log();
+  console.log(`  Hub:`);
+  console.log();
+  console.log(`    intandem hub status          Show running hub daemon info`);
+  console.log(`    intandem hub stop            Stop the hub daemon`);
+  console.log(`    intandem hub logs            Show recent hub daemon logs`);
   console.log();
   console.log(`  Usage:`);
   console.log();
@@ -115,6 +183,12 @@ switch (command) {
     break;
   case 'channel':
     cmdChannel();
+    break;
+  case 'hub-daemon':
+    cmdHubDaemon();
+    break;
+  case 'hub':
+    cmdHub();
     break;
   case 'cleanup':
     clearWorkspaceConfig();

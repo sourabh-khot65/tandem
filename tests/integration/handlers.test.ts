@@ -10,8 +10,7 @@ import type { HubMessage } from '../../src/shared/types.js';
 
 function createState(overrides: Partial<ChannelState> = {}): ChannelState {
   return {
-    hub: null,
-    tunnel: null,
+    hubDaemonPid: null,
     currentPeers: [],
     workspaceName: '',
     myUsername: 'TestUser',
