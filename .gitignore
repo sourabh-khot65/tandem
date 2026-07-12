@@ -5,3 +5,7 @@ dist/
 .tandem/
 .mcp.json
 *.db
+.DS_Store
+.claude/
+.agents/
+skills-lock.json

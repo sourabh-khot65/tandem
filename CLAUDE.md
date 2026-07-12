@@ -15,14 +15,15 @@ npm run typecheck      # Type-check without emitting (tsc --noEmit)
 npm run format         # Format all files with Prettier
 npm run format:check   # Check formatting without writing
 npm run lint           # Run typecheck + format:check
+npm test               # Run all tests (vitest run)
+npx vitest run tests/integration/hub.test.ts       # Run a single test file
+npx vitest run -t "routes messages"                # Run tests matching a name
 ```
 
 Code quality is enforced via git hooks (husky + lint-staged + commitlint):
 
 - **pre-commit**: lint-staged runs Prettier on staged files + tsc --noEmit once
 - **commit-msg**: commitlint enforces conventional commit messages (e.g., `fix:`, `feat:`, `chore:`)
-
-No test framework is configured.
 
 ## Architecture
 
@@ -33,13 +34,20 @@ The system has three layers:
    - `connection.ts` — `HubConnection` class managing WebSocket lifecycle, reconnect with generation counter.
    - `handlers.ts` — Tool call handler functions (create, join, send, board, etc.).
    - `tools.ts` — Tool definitions (JSON schemas for each MCP tool).
-     When creating a workspace, it starts an embedded Hub and opens a localtunnel for remote access. Communicates with Claude via MCP notifications using `notifications/claude/channel`.
 
-2. **Hub (`src/hub/server.ts`)** — A WebSocket server that routes messages between peers. Handles auth (token-based), rate limiting (30 msgs/min per peer), peer lifecycle, and task board operations. Each workspace gets its own SQLite database via `TandemDB`.
+2. **Hub (`src/hub/`)** — A WebSocket server that routes messages between peers.
+   - `server.ts` — Handles auth (token-based), rate limiting (30 msgs/min per peer), peer lifecycle, task board, file locks, and message routing.
+   - `db.ts` — SQLite persistence layer (tasks, messages, findings, variables, file locks). Each workspace gets its own database via `TandemDB`.
+   - `daemon.ts` — Standalone daemon process. The hub runs detached so it survives MCP channel reconnects. Managed via pidfile at `~/.tandem/hub.json`. Set `INTANDEM_NO_TUNNEL=1` to skip cloudflared tunnel (used in tests and CI).
 
-3. **Shared (`src/shared/`)** — Protocol types (`types.ts`), crypto utilities (`crypto.ts` — join codes, tokens, content sanitization), username generation (`names.ts`), and config management (`config.ts` — per-PID session files in `~/.tandem/sessions/` with stale PID cleanup).
+3. **Shared (`src/shared/`)** — Protocol types, utilities, and lifecycle management.
+   - `types.ts` — `HubMessage` discriminated union (uses `kind` field), `FileLock`, `TaskItem`, etc.
+   - `hub-lifecycle.ts` — `spawnHub()`, `findRunningHub()`, `stopHub()` for daemon management.
+   - `crypto.ts` — Join codes, tokens, content sanitization (escapes `<`/`>` to prevent prompt injection).
+   - `config.ts` — Per-PID session files in `~/.tandem/sessions/` with stale PID cleanup.
+   - `tunnel.ts` — Cloudflare quick tunnel wrapper for cross-machine access.
 
-**CLI (`src/cli.ts`)** — Thin entry point for `intandem init` (writes `.mcp.json`), `intandem whoami`, `intandem rename`, and `intandem channel` (starts the MCP server — not meant to be run manually).
+**CLI (`src/cli.ts`)** — Entry point for `intandem init`, `intandem whoami`, `intandem rename`, `intandem hub status/stop/logs`, and `intandem channel` (starts the MCP server).
 
 ### Message flow
 
@@ -47,15 +55,17 @@ Claude A -> MCP tool call -> Channel server -> WebSocket Hub -> Channel server -
 
 ### Key design decisions
 
-- The Channel server is an all-in-one process: it embeds the Hub when creating a workspace (no separate server process).
+- The Channel server embeds the Hub when creating a workspace — the Hub runs as a detached daemon process (`hub-daemon`) that survives MCP reconnects, coordinated via pidfile at `~/.tandem/hub.json`.
 - Join codes encode `{hubUrl, workspaceId, token}` as base64url JSON — the token is the sole auth mechanism.
 - Content sanitization (`sanitizeContent`) escapes `<`/`>` to prevent prompt injection via channel tags.
 - Workspace config persists per-PID in `~/.tandem/sessions/<PID>.json` (stale PIDs auto-cleaned on startup).
 - SQLite databases live at `~/.tandem/data/<workspaceId>.db` with WAL mode.
-- The hub is ephemeral — when the creator's session ends, it shuts down.
+- Advisory file-lock protocol: file-level locks with 5-minute TTL, auto-release on disconnect, real-time broadcast notifications. Channel handlers use a pending-resolve pattern with 3-second timeout for lock/unlock/list operations.
+- ESM (`"type": "module"` in package.json) — all imports use `.js` extensions.
 
-## TypeScript Configuration
+### Test structure
 
-- ES2022 target, Node16 module resolution, strict mode
-- Source in `src/`, output in `dist/`
-- ESM (`"type": "module"` in package.json) — all imports use `.js` extensions
+- `tests/helpers.ts` — Shared utilities: `createTestHub()`, `connectAndAuth()`, `waitFor()`, `sendMsg()`, `collect()`, `sleep()`.
+- `tests/unit/` — Unit tests for crypto, connection, db.
+- `tests/integration/` — Integration tests for hub server, channel handlers, daemon lifecycle, collaboration flows.
+- Daemon tests spawn real child processes and need `dist/` to exist (run `npm run build` first).
