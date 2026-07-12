@@ -42,6 +42,7 @@ export interface ChannelState {
   pendingVarResolve: ((result: string) => void) | null;
   pendingActivityResolve: ((result: string) => void) | null;
   pendingFindingsResolve: ((result: string) => void) | null;
+  pendingLockResolve: ((result: string) => void) | null;
   stats: SessionStats;
 }
 
@@ -152,6 +153,12 @@ export async function handleToolCall(
       return handleLeave(conn, state);
     case 'intandem_rejoin':
       return handleRejoin(conn, state);
+    case 'intandem_lock':
+      return handleLock(args, conn, state);
+    case 'intandem_unlock':
+      return handleUnlock(args, conn, state);
+    case 'intandem_locks':
+      return handleLocks(conn, state);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -689,6 +696,64 @@ async function handleActivityLog(
       if (state.pendingActivityResolve) {
         state.pendingActivityResolve = null;
         resolve(text('Timed out waiting for activity log.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleLock(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const file = args.file as string;
+  if (!file) return text('Specify a file path to lock.');
+  const taskId = args.task_id as string | undefined;
+
+  return new Promise((resolve) => {
+    state.pendingLockResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'lock_acquire', filePath: file, taskId });
+    setTimeout(() => {
+      if (state.pendingLockResolve) {
+        state.pendingLockResolve = null;
+        resolve(text('Timed out waiting for lock response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleUnlock(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const file = args.file as string;
+  if (!file) return text('Specify a file path to unlock.');
+
+  return new Promise((resolve) => {
+    state.pendingLockResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'lock_release', filePath: file });
+    setTimeout(() => {
+      if (state.pendingLockResolve) {
+        state.pendingLockResolve = null;
+        resolve(text('Timed out waiting for unlock response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleLocks(conn: HubConnection, state: ChannelState): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+
+  return new Promise((resolve) => {
+    state.pendingLockResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'locks_request' });
+    setTimeout(() => {
+      if (state.pendingLockResolve) {
+        state.pendingLockResolve = null;
+        resolve(text('Timed out waiting for locks list.'));
       }
     }, 3000);
   });

@@ -285,4 +285,34 @@ export const TOOL_DEFINITIONS = [
     description: 'Reconnect to a previously joined workspace using saved config (no join code needed)',
     inputSchema: { type: 'object' as const, properties: {} },
   },
+  {
+    name: 'intandem_lock',
+    description:
+      'Acquire an advisory lock on a file before editing it. Prevents other peers from editing the same file simultaneously. Locks auto-expire after 5 minutes. Always lock files before editing and unlock when done.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        file: { type: 'string' as const, description: 'File path to lock (relative to project root)' },
+        task_id: { type: 'string' as const, description: 'Optional task ID to associate with this lock' },
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'intandem_unlock',
+    description:
+      'Release an advisory lock on a file after you are done editing it. Always unlock files when your edits are complete.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        file: { type: 'string' as const, description: 'File path to unlock' },
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'intandem_locks',
+    description: 'View all active file locks in the workspace. Shows who has what files locked and when locks expire.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
 ];

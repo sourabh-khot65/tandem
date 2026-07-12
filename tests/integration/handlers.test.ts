@@ -20,6 +20,7 @@ function createState(overrides: Partial<ChannelState> = {}): ChannelState {
     pendingVarResolve: null,
     pendingActivityResolve: null,
     pendingFindingsResolve: null,
+    pendingLockResolve: null,
     stats: {
       connectedAt: 0,
       toolCallCount: 0,
@@ -113,6 +114,21 @@ describe('handleToolCall — disconnected state', () => {
     expect(getResultText(result)).toContain('Not connected');
   });
 
+  it('intandem_lock returns error when not connected', async () => {
+    const result = await handleToolCall('intandem_lock', { file: 'src/foo.ts' }, conn, state);
+    expect(getResultText(result)).toContain('Not connected');
+  });
+
+  it('intandem_unlock returns error when not connected', async () => {
+    const result = await handleToolCall('intandem_unlock', { file: 'src/foo.ts' }, conn, state);
+    expect(getResultText(result)).toContain('Not connected');
+  });
+
+  it('intandem_locks returns error when not connected', async () => {
+    const result = await handleToolCall('intandem_locks', {}, conn, state);
+    expect(getResultText(result)).toContain('Not connected');
+  });
+
   it('intandem_leave returns error when not connected', async () => {
     const result = await handleToolCall('intandem_leave', {}, conn, state);
     expect(getResultText(result)).toContain('Not connected');
@@ -191,6 +207,25 @@ describe('handleToolCall — connected state', () => {
           state.pendingFindingsResolve(`Findings (${msg.findings.length}):\n${lines.join('\n')}`);
         }
         state.pendingFindingsResolve = null;
+      }
+      if (msg.kind === 'lock_result' && state.pendingLockResolve) {
+        if (msg.success) {
+          state.pendingLockResolve(`Locked "${msg.filePath}"`);
+        } else {
+          state.pendingLockResolve(`LOCK DENIED: "${msg.filePath}" is locked by ${msg.lockedBy}`);
+        }
+        state.pendingLockResolve = null;
+      }
+      if (msg.kind === 'locks_list' && state.pendingLockResolve) {
+        if (msg.locks.length === 0) {
+          state.pendingLockResolve('No active file locks.');
+        } else {
+          const lines = msg.locks.map(
+            (l) => `  ${l.filePath} — locked by ${l.lockedBy}${l.taskId ? ` [task: ${l.taskId}]` : ''}`,
+          );
+          state.pendingLockResolve(`Active file locks:\n${lines.join('\n')}`);
+        }
+        state.pendingLockResolve = null;
       }
       if (msg.kind === 'auth_ok') {
         state.workspaceName = msg.workspace.name;
@@ -566,6 +601,47 @@ describe('handleToolCall — connected state', () => {
     const text = getResultText(result);
     expect(text).toContain('Online peers');
     expect(text).toContain('Connection health');
+  });
+
+  // ─── Locking ─────────────────────────────────────────────────────
+
+  it('intandem_lock acquires a file lock', async () => {
+    const result = await handleToolCall('intandem_lock', { file: 'src/auth.ts' }, conn, state);
+    expect(getResultText(result)).toContain('Locked "src/auth.ts"');
+  });
+
+  it('intandem_locks shows active locks', async () => {
+    await handleToolCall('intandem_lock', { file: 'src/auth.ts' }, conn, state);
+    await sleep(100);
+    const result = await handleToolCall('intandem_locks', {}, conn, state);
+    const text = getResultText(result);
+    expect(text).toContain('src/auth.ts');
+    expect(text).toContain('Handler');
+  });
+
+  it('intandem_unlock releases a lock', async () => {
+    await handleToolCall('intandem_lock', { file: 'src/auth.ts' }, conn, state);
+    await sleep(100);
+    const result = await handleToolCall('intandem_unlock', { file: 'src/auth.ts' }, conn, state);
+    expect(getResultText(result)).toContain('Locked "src/auth.ts"');
+    await sleep(100);
+    const list = await handleToolCall('intandem_locks', {}, conn, state);
+    expect(getResultText(list)).toContain('No active file locks');
+  });
+
+  it('intandem_lock with task_id associates lock with task', async () => {
+    await handleToolCall('intandem_add_task', { title: 'Auth fix' }, conn, state);
+    await sleep(200);
+    const result = await handleToolCall('intandem_lock', { file: 'src/auth.ts', task_id: 'T-123' }, conn, state);
+    expect(getResultText(result)).toContain('Locked "src/auth.ts"');
+    await sleep(100);
+    const list = await handleToolCall('intandem_locks', {}, conn, state);
+    expect(getResultText(list)).toContain('T-123');
+  });
+
+  it('intandem_locks shows empty when no locks', async () => {
+    const result = await handleToolCall('intandem_locks', {}, conn, state);
+    expect(getResultText(result)).toContain('No active file locks');
   });
 
   // ─── Leave ───────────────────────────────────────────────────────

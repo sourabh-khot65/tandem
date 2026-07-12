@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import type { TaskItem, Finding, FindingSeverity } from '../shared/types.js';
+import type { TaskItem, Finding, FindingSeverity, FileLock } from '../shared/types.js';
 
 const DATA_DIR = join(homedir(), '.tandem', 'data');
 
@@ -110,6 +110,14 @@ export class TandemDB {
         value TEXT NOT NULL,
         set_by TEXT NOT NULL,
         updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS file_locks (
+        file_path TEXT PRIMARY KEY,
+        locked_by TEXT NOT NULL,
+        locked_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        task_id TEXT
       );
     `);
   }
@@ -345,6 +353,123 @@ export class TandemDB {
       taskId: r.task_id ?? undefined,
       reportedBy: r.reported_by,
       timestamp: r.timestamp,
+    }));
+  }
+
+  acquireLock(
+    filePath: string,
+    lockedBy: string,
+    ttlMs: number,
+    taskId?: string,
+  ): { success: boolean; lock: FileLock } {
+    const now = Date.now();
+    this.db.prepare('DELETE FROM file_locks WHERE file_path = ? AND expires_at < ?').run(filePath, now);
+
+    const existing = this.db.prepare('SELECT * FROM file_locks WHERE file_path = ?').get(filePath) as
+      | { file_path: string; locked_by: string; locked_at: number; expires_at: number; task_id: string | null }
+      | undefined;
+
+    if (existing) {
+      if (existing.locked_by === lockedBy) {
+        const expiresAt = now + ttlMs;
+        this.db
+          .prepare('UPDATE file_locks SET expires_at = ?, task_id = ? WHERE file_path = ?')
+          .run(expiresAt, taskId ?? existing.task_id, filePath);
+        return {
+          success: true,
+          lock: {
+            filePath,
+            lockedBy,
+            lockedAt: existing.locked_at,
+            expiresAt,
+            taskId: taskId ?? existing.task_id ?? undefined,
+          },
+        };
+      }
+      return {
+        success: false,
+        lock: {
+          filePath: existing.file_path,
+          lockedBy: existing.locked_by,
+          lockedAt: existing.locked_at,
+          expiresAt: existing.expires_at,
+          taskId: existing.task_id ?? undefined,
+        },
+      };
+    }
+
+    const lockedAt = now;
+    const expiresAt = now + ttlMs;
+    this.db
+      .prepare('INSERT INTO file_locks (file_path, locked_by, locked_at, expires_at, task_id) VALUES (?, ?, ?, ?, ?)')
+      .run(filePath, lockedBy, lockedAt, expiresAt, taskId ?? null);
+    return { success: true, lock: { filePath, lockedBy, lockedAt, expiresAt, taskId } };
+  }
+
+  releaseLock(filePath: string, lockedBy: string): boolean {
+    const result = this.db
+      .prepare('DELETE FROM file_locks WHERE file_path = ? AND locked_by = ?')
+      .run(filePath, lockedBy);
+    return result.changes > 0;
+  }
+
+  releaseAllLocks(lockedBy: string): FileLock[] {
+    const rows = this.db.prepare('SELECT * FROM file_locks WHERE locked_by = ?').all(lockedBy) as Array<{
+      file_path: string;
+      locked_by: string;
+      locked_at: number;
+      expires_at: number;
+      task_id: string | null;
+    }>;
+    if (rows.length > 0) {
+      this.db.prepare('DELETE FROM file_locks WHERE locked_by = ?').run(lockedBy);
+    }
+    return rows.map((r) => ({
+      filePath: r.file_path,
+      lockedBy: r.locked_by,
+      lockedAt: r.locked_at,
+      expiresAt: r.expires_at,
+      taskId: r.task_id ?? undefined,
+    }));
+  }
+
+  getActiveLocks(): FileLock[] {
+    const now = Date.now();
+    this.db.prepare('DELETE FROM file_locks WHERE expires_at < ?').run(now);
+    const rows = this.db.prepare('SELECT * FROM file_locks ORDER BY locked_at').all() as Array<{
+      file_path: string;
+      locked_by: string;
+      locked_at: number;
+      expires_at: number;
+      task_id: string | null;
+    }>;
+    return rows.map((r) => ({
+      filePath: r.file_path,
+      lockedBy: r.locked_by,
+      lockedAt: r.locked_at,
+      expiresAt: r.expires_at,
+      taskId: r.task_id ?? undefined,
+    }));
+  }
+
+  pruneExpiredLocks(): FileLock[] {
+    const now = Date.now();
+    const rows = this.db.prepare('SELECT * FROM file_locks WHERE expires_at < ?').all(now) as Array<{
+      file_path: string;
+      locked_by: string;
+      locked_at: number;
+      expires_at: number;
+      task_id: string | null;
+    }>;
+    if (rows.length > 0) {
+      this.db.prepare('DELETE FROM file_locks WHERE expires_at < ?').run(now);
+    }
+    return rows.map((r) => ({
+      filePath: r.file_path,
+      lockedBy: r.locked_by,
+      lockedAt: r.locked_at,
+      expiresAt: r.expires_at,
+      taskId: r.task_id ?? undefined,
     }));
   }
 

@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
-import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType } from '../shared/types.js';
+import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType, FileLock } from '../shared/types.js';
 
 const VALID_MESSAGE_TYPES: MessageType[] = [
   'finding',
@@ -49,9 +49,12 @@ interface AuthTicket {
   createdAt: number;
 }
 
-const TICKET_TTL_MS = 30_000; // tickets expire after 30 seconds
+const TICKET_TTL_MS = 30_000;
 const MAX_INVITE_ATTEMPTS_PER_MIN = 5;
-const MAX_WS_PAYLOAD = 64 * 1024; // 64KB max WebSocket message (H4 fix)
+const MAX_WS_PAYLOAD = 64 * 1024;
+const DEFAULT_LOCK_TTL_MS = 5 * 60 * 1000;
+const LOCK_CLEANUP_INTERVAL_MS = 60 * 1000;
+const MAX_FILE_PATH_LENGTH = 500;
 
 export class TandemHub {
   private wss: WebSocketServer | null = null;
@@ -63,6 +66,7 @@ export class TandemHub {
   private maxMessagesPerWindow = 30;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private rateLimitInterval: ReturnType<typeof setInterval> | null = null;
+  private lockCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   createWorkspace(name: string, maxPeers = 5): { workspaceId: string; token: string } {
     const workspaceId = generateWorkspaceId();
@@ -142,6 +146,7 @@ export class TandemHub {
 
       // Ping all peers every 30s to detect dead connections
       this.pingInterval = setInterval(() => this.pingAllPeers(), 30_000);
+      this.lockCleanupInterval = setInterval(() => this.cleanupExpiredLocks(), LOCK_CLEANUP_INTERVAL_MS);
     });
   }
 
@@ -266,6 +271,15 @@ export class TandemHub {
         case 'var_get':
           this.handleVarGet(ws, workspace, msg.key);
           break;
+        case 'lock_acquire':
+          this.handleLockAcquire(ws, workspace, peerUsername, msg.filePath, msg.taskId);
+          break;
+        case 'lock_release':
+          this.handleLockRelease(ws, workspace, peerUsername, msg.filePath);
+          break;
+        case 'locks_request':
+          this.handleLocksRequest(ws, workspace);
+          break;
         // invite_resolve handled pre-auth above
       }
     });
@@ -279,6 +293,10 @@ export class TandemHub {
           workspace.peers.delete(peerUsername);
           try {
             workspace.db.logActivity(peerUsername, 'left');
+            const releasedLocks = workspace.db.releaseAllLocks(peerUsername);
+            for (const lock of releasedLocks) {
+              this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'released' });
+            }
           } catch {
             // DB may already be closed during shutdown
           }
@@ -716,6 +734,89 @@ export class TandemHub {
     }
   }
 
+  private handleLockAcquire(
+    ws: WebSocket,
+    workspace: Workspace,
+    from: string,
+    filePath: string,
+    taskId?: string,
+  ): void {
+    try {
+      if (filePath.length > MAX_FILE_PATH_LENGTH) {
+        this.send(ws, { kind: 'lock_result', filePath, success: false, reason: 'File path too long (max 500 chars)' });
+        return;
+      }
+      const result = workspace.db.acquireLock(filePath, from, DEFAULT_LOCK_TTL_MS, taskId);
+      if (result.success) {
+        workspace.db.logActivity(from, 'lock_acquired', filePath);
+        this.send(ws, {
+          kind: 'lock_result',
+          filePath,
+          success: true,
+          expiresAt: result.lock.expiresAt,
+        });
+        this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock: result.lock, event: 'acquired' }, from);
+      } else {
+        this.send(ws, {
+          kind: 'lock_result',
+          filePath,
+          success: false,
+          lockedBy: result.lock.lockedBy,
+          expiresAt: result.lock.expiresAt,
+        });
+      }
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleLockRelease(ws: WebSocket, workspace: Workspace, from: string, filePath: string): void {
+    try {
+      const released = workspace.db.releaseLock(filePath, from);
+      if (released) {
+        workspace.db.logActivity(from, 'lock_released', filePath);
+        this.send(ws, { kind: 'lock_result', filePath, success: true });
+        const lock: FileLock = { filePath, lockedBy: from, lockedAt: 0, expiresAt: 0 };
+        this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'released' }, from);
+      } else {
+        this.send(ws, {
+          kind: 'lock_result',
+          filePath,
+          success: false,
+          reason: 'You do not hold a lock on this file',
+        });
+      }
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleLocksRequest(ws: WebSocket, workspace: Workspace): void {
+    try {
+      const locks = workspace.db.getActiveLocks();
+      this.send(ws, { kind: 'locks_list', locks });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private cleanupExpiredLocks(): void {
+    for (const workspace of this.workspaces.values()) {
+      try {
+        const expired = workspace.db.pruneExpiredLocks();
+        for (const lock of expired) {
+          workspace.db.logActivity('system', 'lock_expired', `${lock.filePath} (was held by ${lock.lockedBy})`);
+          this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'expired' });
+        }
+      } catch {
+        // DB may be closed
+      }
+    }
+  }
+
   private sendBoard(ws: WebSocket, workspace: Workspace): void {
     this.send(ws, { kind: 'board', tasks: workspace.db.getAllTasks() });
   }
@@ -781,6 +882,14 @@ export class TandemHub {
       }
       for (const username of dead) {
         workspace.peers.delete(username);
+        try {
+          const releasedLocks = workspace.db.releaseAllLocks(username);
+          for (const lock of releasedLocks) {
+            this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'released' });
+          }
+        } catch {
+          // DB may be closed
+        }
         this.broadcastToWorkspace(workspace, {
           kind: 'peer_left',
           username,
@@ -793,6 +902,7 @@ export class TandemHub {
   stop(): void {
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.rateLimitInterval) clearInterval(this.rateLimitInterval);
+    if (this.lockCleanupInterval) clearInterval(this.lockCleanupInterval);
     for (const workspace of this.workspaces.values()) {
       workspace.db.close();
       for (const peer of workspace.peers.values()) {

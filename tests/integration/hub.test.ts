@@ -429,3 +429,226 @@ describe('capabilities', () => {
     w2.close();
   });
 });
+
+// ─── File locks ───────────────────────────────────────────────────────
+
+describe('file locks', () => {
+  it('acquires a lock and responds with success', async () => {
+    const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+    const resultPromise = waitFor(ws, (m) => m.kind === 'lock_result');
+    sendMsg(ws, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const msg = await resultPromise;
+
+    expect(msg.kind).toBe('lock_result');
+    if (msg.kind === 'lock_result') {
+      expect(msg.success).toBe(true);
+      expect(msg.filePath).toBe('src/auth.ts');
+      expect(msg.expiresAt).toBeGreaterThan(Date.now());
+    }
+    ws.close();
+  });
+
+  it('denies lock held by another peer', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+
+    // Alice locks
+    const lockPromise = waitFor(w1, (m) => m.kind === 'lock_result');
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await lockPromise;
+
+    // Bob tries to lock same file
+    const denyPromise = waitFor(w2, (m) => m.kind === 'lock_result');
+    sendMsg(w2, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const deny = await denyPromise;
+
+    expect(deny.kind).toBe('lock_result');
+    if (deny.kind === 'lock_result') {
+      expect(deny.success).toBe(false);
+      expect(deny.lockedBy).toBe('Alice');
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('broadcasts lock_update to other peers on acquire', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+
+    const updatePromise = waitFor(w2, (m) => m.kind === 'lock_update');
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const update = await updatePromise;
+
+    expect(update.kind).toBe('lock_update');
+    if (update.kind === 'lock_update') {
+      expect(update.event).toBe('acquired');
+      expect(update.lock.filePath).toBe('src/auth.ts');
+      expect(update.lock.lockedBy).toBe('Alice');
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('releases lock and broadcasts to peers', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+    await collect(w2, 100);
+
+    // Alice locks
+    const lockPromise = waitFor(w1, (m) => m.kind === 'lock_result');
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await lockPromise;
+    await collect(w2, 100); // drain lock_update
+
+    // Alice unlocks
+    const releasePromise = waitFor(w2, (m) => m.kind === 'lock_update');
+    const resultPromise = waitFor(w1, (m) => m.kind === 'lock_result');
+    sendMsg(w1, { kind: 'lock_release', filePath: 'src/auth.ts' });
+
+    const result = await resultPromise;
+    expect(result.kind).toBe('lock_result');
+    if (result.kind === 'lock_result') expect(result.success).toBe(true);
+
+    const release = await releasePromise;
+    expect(release.kind).toBe('lock_update');
+    if (release.kind === 'lock_update') {
+      expect(release.event).toBe('released');
+      expect(release.lock.filePath).toBe('src/auth.ts');
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('allows re-lock after release by different peer', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+
+    // Alice locks then unlocks
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await waitFor(w1, (m) => m.kind === 'lock_result');
+    sendMsg(w1, { kind: 'lock_release', filePath: 'src/auth.ts' });
+    await waitFor(w1, (m) => m.kind === 'lock_result');
+    await sleep(100);
+
+    // Bob can now lock it
+    const bobResult = waitFor(w2, (m) => m.kind === 'lock_result');
+    sendMsg(w2, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const msg = await bobResult;
+
+    expect(msg.kind).toBe('lock_result');
+    if (msg.kind === 'lock_result') expect(msg.success).toBe(true);
+    w1.close();
+    w2.close();
+  });
+
+  it('releases locks on peer disconnect', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w2, 100);
+
+    // Alice locks a file
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await waitFor(w1, (m) => m.kind === 'lock_result');
+    await collect(w2, 100); // drain lock_update
+
+    // Alice disconnects — Bob should get lock_update(released)
+    const releasePromise = waitFor(w2, (m) => m.kind === 'lock_update' && m.event === 'released');
+    w1.close();
+    const release = await releasePromise;
+
+    expect(release.kind).toBe('lock_update');
+    if (release.kind === 'lock_update') {
+      expect(release.event).toBe('released');
+      expect(release.lock.filePath).toBe('src/auth.ts');
+    }
+    w2.close();
+  });
+
+  it('lists all active locks', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+
+    // Alice and Bob each lock a file
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await waitFor(w1, (m) => m.kind === 'lock_result');
+    sendMsg(w2, { kind: 'lock_acquire', filePath: 'src/db.ts' });
+    await waitFor(w2, (m) => m.kind === 'lock_result');
+
+    // Alice requests lock list
+    const listPromise = waitFor(w1, (m) => m.kind === 'locks_list');
+    sendMsg(w1, { kind: 'locks_request' });
+    const list = await listPromise;
+
+    expect(list.kind).toBe('locks_list');
+    if (list.kind === 'locks_list') {
+      expect(list.locks.length).toBe(2);
+      const paths = list.locks.map((l) => l.filePath).sort();
+      expect(paths).toEqual(['src/auth.ts', 'src/db.ts']);
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('extends TTL on re-lock by same peer', async () => {
+    const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    // Lock once
+    sendMsg(ws, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const first = await waitFor(ws, (m) => m.kind === 'lock_result');
+
+    // Lock again (should extend TTL)
+    sendMsg(ws, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    const second = await waitFor(ws, (m) => m.kind === 'lock_result');
+
+    if (first.kind === 'lock_result' && second.kind === 'lock_result') {
+      expect(second.success).toBe(true);
+      expect(second.expiresAt!).toBeGreaterThanOrEqual(first.expiresAt!);
+    }
+    ws.close();
+  });
+
+  it('rejects release by non-holder', async () => {
+    const { ws: w1 } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: w2 } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(w1, 100);
+
+    // Alice locks
+    sendMsg(w1, { kind: 'lock_acquire', filePath: 'src/auth.ts' });
+    await waitFor(w1, (m) => m.kind === 'lock_result');
+    await sleep(100);
+
+    // Bob tries to unlock
+    const resultPromise = waitFor(w2, (m) => m.kind === 'lock_result');
+    sendMsg(w2, { kind: 'lock_release', filePath: 'src/auth.ts' });
+    const result = await resultPromise;
+
+    expect(result.kind).toBe('lock_result');
+    if (result.kind === 'lock_result') {
+      expect(result.success).toBe(false);
+      expect(result.reason).toContain('do not hold');
+    }
+    w1.close();
+    w2.close();
+  });
+
+  it('includes taskId in lock', async () => {
+    const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+    sendMsg(ws, { kind: 'lock_acquire', filePath: 'src/auth.ts', taskId: 'T-fix-auth' });
+    await waitFor(ws, (m) => m.kind === 'lock_result');
+
+    const listPromise = waitFor(ws, (m) => m.kind === 'locks_list');
+    sendMsg(ws, { kind: 'locks_request' });
+    const list = await listPromise;
+
+    expect(list.kind).toBe('locks_list');
+    if (list.kind === 'locks_list') {
+      expect(list.locks[0].taskId).toBe('T-fix-auth');
+    }
+    ws.close();
+  });
+});

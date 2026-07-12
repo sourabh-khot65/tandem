@@ -49,6 +49,12 @@ export type HubMessage =
   | { kind: 'finding_broadcast'; finding: Finding }
   | { kind: 'findings_request'; severity?: FindingSeverity; service?: string }
   | { kind: 'findings_list'; findings: Finding[] }
+  | { kind: 'lock_acquire'; filePath: string; taskId?: string }
+  | { kind: 'lock_release'; filePath: string }
+  | { kind: 'lock_result'; filePath: string; success: boolean; lockedBy?: string; expiresAt?: number; reason?: string }
+  | { kind: 'lock_update'; lock: FileLock; event: 'acquired' | 'released' | 'expired' }
+  | { kind: 'locks_request' }
+  | { kind: 'locks_list'; locks: FileLock[] }
   | { kind: 'error'; message: string };
 
 export interface WorkspaceInfo {
@@ -80,6 +86,14 @@ export interface TaskItem {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface FileLock {
+  filePath: string;
+  lockedBy: string;
+  lockedAt: number;
+  expiresAt: number;
+  taskId?: string;
 }
 
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
