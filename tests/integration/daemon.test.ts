@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll } from 'vitest';
 import WebSocket from 'ws';
 import { existsSync } from 'node:fs';
 import { spawnHub, findRunningHub, stopHub, HUB_FILE } from '../../src/shared/hub-lifecycle.js';
@@ -7,6 +7,10 @@ import type { HubMessage } from '../../src/shared/types.js';
 import { connectAndAuth, sendMsg, waitFor, sleep } from '../helpers.js';
 
 const TIMEOUT = 30_000;
+
+beforeAll(() => {
+  process.env.INTANDEM_NO_TUNNEL = '1';
+});
 
 let daemonInfo: HubDaemonInfo | null = null;
 

@@ -140,13 +140,17 @@ export async function startHubDaemon(opts: DaemonArgs): Promise<void> {
 
   // Start tunnel in background — don't block the daemon startup
   let tunnel: TunnelHandle | null = null;
-  manageTunnel(port, info)
-    .then((t) => {
-      tunnel = t;
-    })
-    .catch(() => {
-      log('All tunnel attempts failed — local-only mode');
-    });
+  if (process.env.INTANDEM_NO_TUNNEL) {
+    log('Tunnel disabled via INTANDEM_NO_TUNNEL');
+  } else {
+    manageTunnel(port, info)
+      .then((t) => {
+        tunnel = t;
+      })
+      .catch(() => {
+        log('All tunnel attempts failed — local-only mode');
+      });
+  }
 
   // Idle shutdown: no peers for IDLE_TIMEOUT → exit
   let idleStart: number | null = Date.now();

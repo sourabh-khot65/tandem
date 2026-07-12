@@ -101,7 +101,7 @@ export async function spawnHub(opts: {
   if (!info) throw new Error('Hub daemon failed to start within 30 seconds');
 
   // Phase 2: Brief wait for tunnel URL (daemon starts tunnel in background)
-  if (!info.tunnelUrl) {
+  if (!info.tunnelUrl && !process.env.INTANDEM_NO_TUNNEL) {
     const tStart = Date.now();
     while (Date.now() - tStart < 5_000) {
       await new Promise<void>((r) => setTimeout(r, 500));
