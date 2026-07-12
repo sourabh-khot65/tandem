@@ -9,7 +9,7 @@ git clone https://github.com/sourabh-khot65/tandem.git
 cd tandem
 npm install
 npm run build
-npm test        # 179 tests, all should pass
+npm test        # 209 tests, all should pass
 ```
 
 ## Development Workflow
@@ -32,12 +32,12 @@ Code quality is enforced via git hooks:
 ```
 src/
   channel/    MCP server, WebSocket client, tool handlers
-  hub/        WebSocket hub, SQLite persistence
+  hub/        WebSocket hub, daemon lifecycle, SQLite persistence
   shared/     Protocol types, cryptography, configuration
   cli.ts      CLI entrypoint
 tests/
   unit/       Crypto, DB, connection tests
-  integration/ Hub protocol, collaboration, handler tests
+  integration/ Hub protocol, daemon, collaboration, handler tests
 ```
 
 ## Making Changes
@@ -52,10 +52,10 @@ tests/
 
 Check issues labeled [`good first issue`](https://github.com/sourabh-khot65/tandem/labels/good%20first%20issue) for entry points. Bigger areas:
 
-- **Connection reliability** — replace localtunnel with cloudflared
 - **Tool delegation** — let peers execute tools on each other's behalf
 - **Agent spawning** — integrate with Claude Code's native Agent tool
 - **Local-only mode** — Unix socket or file-based IPC for same-machine peers
+- **Conflict resolution** — smarter merge strategies when file locks overlap
 - **More tests** — especially for channel/server.ts (MCP transport layer)
 
 ## Code Style

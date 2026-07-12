@@ -6,6 +6,10 @@ dist/
 .mcp.json
 *.db
 .DS_Store
-.claude/
+# Claude Code — track shared config, ignore personal/local
+.claude/settings.local.json
+.claude/skills/
+.claude/workflows/
+.claude/plans/
 .agents/
 skills-lock.json
