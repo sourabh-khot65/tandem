@@ -652,3 +652,202 @@ describe('file locks', () => {
     ws.close();
   });
 });
+
+// ─── Dashboard ──────────────────────────────────────────────────────
+
+describe('dashboard', () => {
+  describe('HTTP endpoint', () => {
+    it('returns 401 without token', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard`);
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 401 with invalid token', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=bad-token`);
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 200 with valid token', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=${encodeURIComponent(th.token)}`);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('InTandem');
+      expect(html).toContain('test-workspace');
+    });
+
+    it('returns 404 for unknown paths', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/unknown`);
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe('observer connection', () => {
+    it('receives dashboard_sync on connect', async () => {
+      const ws = new WebSocket(th.url);
+      await new Promise<void>((r) => ws.on('open', r));
+      sendMsg(ws, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+
+      const sync = await waitFor(ws, (m) => m.kind === 'dashboard_sync');
+      expect(sync.kind).toBe('dashboard_sync');
+      if (sync.kind === 'dashboard_sync') {
+        expect(sync.workspace.name).toBe('test-workspace');
+        expect(sync.workspace.id).toBe(th.workspaceId);
+        expect(sync.peers).toEqual([]);
+        expect(sync.tasks).toEqual([]);
+        expect(sync.locks).toEqual([]);
+      }
+      ws.close();
+    });
+
+    it('does not appear in peer list', async () => {
+      const dashWs = new WebSocket(th.url);
+      await new Promise<void>((r) => dashWs.on('open', r));
+      sendMsg(dashWs, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+      const { ws: peerWs, msg } = await connectAndAuth(th.url, th.token, 'Alice');
+      expect(msg.kind).toBe('auth_ok');
+      if (msg.kind === 'auth_ok') {
+        expect(msg.workspace.peers).not.toContain('__dashboard__');
+      }
+
+      peerWs.close();
+      dashWs.close();
+    });
+
+    it('does not trigger peer_joined broadcast', async () => {
+      const { ws: peerWs } = await connectAndAuth(th.url, th.token, 'Alice');
+
+      const dashWs = new WebSocket(th.url);
+      await new Promise<void>((r) => dashWs.on('open', r));
+      sendMsg(dashWs, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+      // Alice should not receive a peer_joined for __dashboard__
+      const msgs = await collect(peerWs, 300);
+      const dashboardJoins = msgs.filter(
+        (m) =>
+          m.kind === 'peer_joined' && (m as Extract<HubMessage, { kind: 'peer_joined' }>).username === '__dashboard__',
+      );
+      expect(dashboardJoins).toHaveLength(0);
+
+      peerWs.close();
+      dashWs.close();
+    });
+
+    it('does not count toward maxPeers', async () => {
+      const small = await createTestHub('small', 1);
+      try {
+        // Dashboard connects first
+        const dashWs = new WebSocket(small.url);
+        await new Promise<void>((r) => dashWs.on('open', r));
+        sendMsg(dashWs, { kind: 'auth', token: small.token, username: '__dashboard__', sessionId: '__dashboard__' });
+        await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+        // Peer should still be able to join (1 slot available)
+        const { ws: peerWs, msg } = await connectAndAuth(small.url, small.token, 'Alice');
+        expect(msg.kind).toBe('auth_ok');
+
+        peerWs.close();
+        dashWs.close();
+      } finally {
+        small.hub.stop();
+      }
+    });
+
+    it('receives board_update broadcasts', async () => {
+      const dashWs = new WebSocket(th.url);
+      await new Promise<void>((r) => dashWs.on('open', r));
+      sendMsg(dashWs, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+      const { ws: peerWs } = await connectAndAuth(th.url, th.token, 'Alice');
+      const updatePromise = waitFor(dashWs, (m) => m.kind === 'board_update');
+
+      sendMsg(peerWs, {
+        kind: 'board_update',
+        task: {
+          id: 'T-dash-1',
+          title: 'Dashboard test task',
+          status: 'open',
+          createdBy: 'Alice',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      });
+
+      const update = await updatePromise;
+      expect(update.kind).toBe('board_update');
+      if (update.kind === 'board_update') {
+        expect(update.task.title).toBe('Dashboard test task');
+      }
+
+      peerWs.close();
+      dashWs.close();
+    });
+
+    it('receives peer_joined and peer_left broadcasts', async () => {
+      const dashWs = new WebSocket(th.url);
+      await new Promise<void>((r) => dashWs.on('open', r));
+      sendMsg(dashWs, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+      const joinPromise = waitFor(dashWs, (m) => m.kind === 'peer_joined');
+      const { ws: peerWs } = await connectAndAuth(th.url, th.token, 'Bob');
+      const joined = await joinPromise;
+      expect(joined.kind).toBe('peer_joined');
+
+      const leftPromise = waitFor(dashWs, (m) => m.kind === 'peer_left');
+      peerWs.close();
+      const left = await leftPromise;
+      expect(left.kind).toBe('peer_left');
+
+      dashWs.close();
+    });
+
+    it('receives activity_entry broadcasts', async () => {
+      const dashWs = new WebSocket(th.url);
+      await new Promise<void>((r) => dashWs.on('open', r));
+      sendMsg(dashWs, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      await waitFor(dashWs, (m) => m.kind === 'dashboard_sync');
+
+      const activityPromise = waitFor(dashWs, (m) => m.kind === 'activity_entry');
+      const { ws: peerWs } = await connectAndAuth(th.url, th.token, 'Carol');
+      const activity = await activityPromise;
+      expect(activity.kind).toBe('activity_entry');
+      if (activity.kind === 'activity_entry') {
+        expect(activity.entry.actor).toBe('Carol');
+        expect(activity.entry.action).toBe('joined');
+      }
+
+      peerWs.close();
+      dashWs.close();
+    });
+
+    it('multiple dashboards can connect simultaneously', async () => {
+      const dash1 = new WebSocket(th.url);
+      const dash2 = new WebSocket(th.url);
+      await Promise.all([new Promise<void>((r) => dash1.on('open', r)), new Promise<void>((r) => dash2.on('open', r))]);
+      sendMsg(dash1, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dash1__' });
+      sendMsg(dash2, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dash2__' });
+      const [sync1, sync2] = await Promise.all([
+        waitFor(dash1, (m) => m.kind === 'dashboard_sync'),
+        waitFor(dash2, (m) => m.kind === 'dashboard_sync'),
+      ]);
+      expect(sync1.kind).toBe('dashboard_sync');
+      expect(sync2.kind).toBe('dashboard_sync');
+
+      // Both receive peer_joined
+      const [join1, join2] = await Promise.all([
+        waitFor(dash1, (m) => m.kind === 'peer_joined'),
+        waitFor(dash2, (m) => m.kind === 'peer_joined'),
+        connectAndAuth(th.url, th.token, 'Dave').then(({ ws }) => ws),
+      ]);
+      expect(join1.kind).toBe('peer_joined');
+      expect(join2.kind).toBe('peer_joined');
+
+      dash1.close();
+      dash2.close();
+    });
+  });
+});

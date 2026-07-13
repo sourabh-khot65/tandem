@@ -123,6 +123,8 @@ export async function startHubDaemon(opts: DaemonArgs): Promise<void> {
   const inviteCode = generateInviteCode();
   hub.registerInviteCode(workspaceId, inviteCode);
 
+  const dashboardUrl = `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}`;
+
   const info: HubDaemonInfo = {
     pid: process.pid,
     port,
@@ -133,9 +135,11 @@ export async function startHubDaemon(opts: DaemonArgs): Promise<void> {
     inviteCode,
     startedAt: Date.now(),
     maxPeers: opts.maxPeers,
+    dashboardUrl,
   };
 
   writeHubFile(info);
+  log(`Dashboard: ${dashboardUrl}`);
   log('Hub file written');
 
   // Start tunnel in background — don't block the daemon startup

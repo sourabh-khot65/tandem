@@ -18,6 +18,7 @@ export interface HubDaemonInfo {
   inviteCode: string;
   startedAt: number;
   maxPeers: number;
+  dashboardUrl?: string;
 }
 
 function isProcessAlive(pid: number): boolean {

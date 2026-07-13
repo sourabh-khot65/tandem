@@ -55,6 +55,18 @@ export type HubMessage =
   | { kind: 'lock_update'; lock: FileLock; event: 'acquired' | 'released' | 'expired' }
   | { kind: 'locks_request' }
   | { kind: 'locks_list'; locks: FileLock[] }
+  | {
+      kind: 'dashboard_sync';
+      workspace: WorkspaceInfo;
+      peers: PeerInfo[];
+      tasks: TaskItem[];
+      locks: FileLock[];
+      findings: Finding[];
+      vars: Array<{ key: string; value: string; setBy: string }>;
+      activity: Array<{ timestamp: number; actor: string; action: string; detail?: string }>;
+      messages: Array<{ type: string; from: string; to?: string; content: string; timestamp: number }>;
+    }
+  | { kind: 'activity_entry'; entry: { timestamp: number; actor: string; action: string; detail?: string } }
   | { kind: 'error'; message: string };
 
 export interface WorkspaceInfo {

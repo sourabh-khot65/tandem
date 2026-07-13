@@ -1,6 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
+import { getDashboardHtml } from './dashboard.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
 import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType, FileLock } from '../shared/types.js';
 
@@ -33,6 +35,7 @@ interface Workspace {
   maxPeers: number;
   inviteCode?: string; // short human-readable code
   peers: Map<string, ConnectedPeer>;
+  dashboards: Set<WebSocket>;
   knownSessions: Set<string>;
   db: TandemDB;
 }
@@ -57,6 +60,7 @@ const LOCK_CLEANUP_INTERVAL_MS = 60 * 1000;
 const MAX_FILE_PATH_LENGTH = 500;
 
 export class TandemHub {
+  private httpServer: HttpServer | null = null;
   private wss: WebSocketServer | null = null;
   private workspaces = new Map<string, Workspace>();
   private inviteCodes = new Map<string, Workspace>();
@@ -78,6 +82,7 @@ export class TandemHub {
       token,
       maxPeers: Math.min(maxPeers, 5),
       peers: new Map(),
+      dashboards: new Set(),
       knownSessions: new Set(),
       db: new TandemDB(workspaceId),
     };
@@ -110,6 +115,7 @@ export class TandemHub {
       token,
       maxPeers: Math.min(maxPeers, 5),
       peers: new Map(),
+      dashboards: new Set(),
       knownSessions: new Set(),
       db: new TandemDB(workspaceId), // reuses existing DB file
     };
@@ -118,14 +124,16 @@ export class TandemHub {
 
   start(options: HubOptions): Promise<{ port: number; joinCodes: Map<string, string> }> {
     return new Promise((resolve) => {
+      this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
       this.wss = new WebSocketServer({
-        port: options.port,
-        host: options.host ?? '127.0.0.1',
+        server: this.httpServer,
         maxPayload: MAX_WS_PAYLOAD,
       });
 
-      this.wss.on('listening', () => {
-        const addr = this.wss!.address();
+      this.httpServer.listen(options.port, options.host ?? '127.0.0.1');
+
+      this.httpServer.on('listening', () => {
+        const addr = this.httpServer!.address();
         const actualPort = typeof addr === 'object' && addr !== null ? addr.port : options.port;
         const hubUrl = `ws://${options.host ?? '127.0.0.1'}:${actualPort}`;
 
@@ -148,6 +156,40 @@ export class TandemHub {
       this.pingInterval = setInterval(() => this.pingAllPeers(), 30_000);
       this.lockCleanupInterval = setInterval(() => this.cleanupExpiredLocks(), LOCK_CLEANUP_INTERVAL_MS);
     });
+  }
+
+  private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+    if (req.method === 'GET' && url.pathname === '/dashboard') {
+      const token = url.searchParams.get('token');
+      if (!token) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Missing token');
+        return;
+      }
+
+      let targetWorkspace: Workspace | null = null;
+      for (const w of this.workspaces.values()) {
+        if (w.token === token) {
+          targetWorkspace = w;
+          break;
+        }
+      }
+
+      if (!targetWorkspace) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Invalid token');
+        return;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(getDashboardHtml(targetWorkspace.name));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
   }
 
   private handleConnection(ws: WebSocket): void {
@@ -291,8 +333,8 @@ export class TandemHub {
         const currentPeer = workspace.peers.get(peerUsername);
         if (currentPeer && currentPeer.ws === ws) {
           workspace.peers.delete(peerUsername);
+          this.broadcastActivity(workspace, peerUsername, 'left');
           try {
-            workspace.db.logActivity(peerUsername, 'left');
             const releasedLocks = workspace.db.releaseAllLocks(peerUsername);
             for (const lock of releasedLocks) {
               this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'released' });
@@ -348,6 +390,17 @@ export class TandemHub {
       return;
     }
 
+    // Dashboard observer — read-only, no peer slot
+    if (msg.username === '__dashboard__') {
+      targetWorkspace.dashboards.add(ws);
+      ws.on('close', () => {
+        targetWorkspace.dashboards.delete(ws);
+      });
+      this.sendDashboardSync(ws, targetWorkspace);
+      onSuccess(targetWorkspace, '__dashboard__');
+      return;
+    }
+
     // Prune dead peers before checking capacity
     for (const [u, p] of targetWorkspace.peers) {
       if (p.ws.readyState === WebSocket.CLOSED || p.ws.readyState === WebSocket.CLOSING) {
@@ -395,7 +448,7 @@ export class TandemHub {
     });
 
     targetWorkspace.peers.set(username, peer);
-    targetWorkspace.db.logActivity(username, 'joined', `Session ${msg.sessionId.slice(0, 8)}`);
+    this.broadcastActivity(targetWorkspace, username, 'joined', `Session ${msg.sessionId.slice(0, 8)}`);
 
     this.send(ws, {
       kind: 'auth_ok',
@@ -472,8 +525,13 @@ export class TandemHub {
     }
 
     // Log activity and message to DB (may fail during shutdown)
+    this.broadcastActivity(
+      workspace,
+      from,
+      'message',
+      `${payload.type}${payload.to ? ` → ${payload.to}` : ' (broadcast)'}`,
+    );
     try {
-      workspace.db.logActivity(from, 'message', `${payload.type}${payload.to ? ` → ${payload.to}` : ' (broadcast)'}`);
       workspace.db.logMessage({
         type: payload.type,
         from: payload.from,
@@ -604,7 +662,8 @@ export class TandemHub {
       if (task.result !== undefined) updates.result = task.result;
       const updated = workspace.db.updateTask(task.id, updates);
       if (updated) {
-        workspace.db.logActivity(
+        this.broadcastActivity(
+          workspace,
           from,
           'task_update',
           `[${task.id}] → ${task.status}${task.assignee ? ` (${task.assignee})` : ''}`,
@@ -628,7 +687,8 @@ export class TandemHub {
         if (!allDone) task.status = 'blocked';
       }
       workspace.db.createTask(task);
-      workspace.db.logActivity(
+      this.broadcastActivity(
+        workspace,
         from,
         'task_create',
         `[${task.id}] ${task.title}${task.priority ? ` (${task.priority})` : ''}`,
@@ -653,7 +713,7 @@ export class TandemHub {
       if (allDone) {
         const updated = workspace.db.updateTask(t.id, { status: 'open' });
         if (updated) {
-          workspace.db.logActivity('system', 'task_unblocked', `[${t.id}] ${t.title} — all dependencies met`);
+          this.broadcastActivity(workspace, 'system', 'task_unblocked', `[${t.id}] ${t.title} — all dependencies met`);
           this.broadcastToWorkspace(workspace, { kind: 'board_update', task: updated, triggeredBy });
         }
       }
@@ -707,7 +767,8 @@ export class TandemHub {
     try {
       finding.reportedBy = from; // enforce identity
       workspace.db.createFinding(finding);
-      workspace.db.logActivity(
+      this.broadcastActivity(
+        workspace,
         from,
         'finding',
         `[${finding.severity.toUpperCase()}] ${finding.service}: ${finding.category ?? finding.patterns?.[0]?.pattern ?? 'reported'}`,
@@ -748,7 +809,7 @@ export class TandemHub {
       }
       const result = workspace.db.acquireLock(filePath, from, DEFAULT_LOCK_TTL_MS, taskId);
       if (result.success) {
-        workspace.db.logActivity(from, 'lock_acquired', filePath);
+        this.broadcastActivity(workspace, from, 'lock_acquired', filePath);
         this.send(ws, {
           kind: 'lock_result',
           filePath,
@@ -775,7 +836,7 @@ export class TandemHub {
     try {
       const released = workspace.db.releaseLock(filePath, from);
       if (released) {
-        workspace.db.logActivity(from, 'lock_released', filePath);
+        this.broadcastActivity(workspace, from, 'lock_released', filePath);
         this.send(ws, { kind: 'lock_result', filePath, success: true });
         const lock: FileLock = { filePath, lockedBy: from, lockedAt: 0, expiresAt: 0 };
         this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'released' }, from);
@@ -808,13 +869,63 @@ export class TandemHub {
       try {
         const expired = workspace.db.pruneExpiredLocks();
         for (const lock of expired) {
-          workspace.db.logActivity('system', 'lock_expired', `${lock.filePath} (was held by ${lock.lockedBy})`);
+          this.broadcastActivity(
+            workspace,
+            'system',
+            'lock_expired',
+            `${lock.filePath} (was held by ${lock.lockedBy})`,
+          );
           this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock, event: 'expired' });
         }
       } catch {
         // DB may be closed
       }
     }
+  }
+
+  private sendDashboardSync(ws: WebSocket, workspace: Workspace): void {
+    const peers: PeerInfo[] = [];
+    for (const [username, peer] of workspace.peers) {
+      peers.push({
+        username,
+        connectedAt: peer.connectedAt,
+        lastActiveAt: peer.lastMessageAt || peer.connectedAt,
+      });
+    }
+
+    try {
+      this.send(ws, {
+        kind: 'dashboard_sync',
+        workspace: {
+          name: workspace.name,
+          id: workspace.id,
+          peers: Array.from(workspace.peers.keys()),
+          maxPeers: workspace.maxPeers,
+          inviteCode: workspace.inviteCode,
+        },
+        peers,
+        tasks: workspace.db.getAllTasks(),
+        locks: workspace.db.getActiveLocks(),
+        findings: workspace.db.getFindings(),
+        vars: workspace.db.getAllVars(),
+        activity: workspace.db.getActivityLog(50),
+        messages: workspace.db.getRecentMessages(20),
+      });
+    } catch {
+      // DB may be closed
+    }
+  }
+
+  private broadcastActivity(workspace: Workspace, actor: string, action: string, detail?: string): void {
+    try {
+      workspace.db.logActivity(actor, action, detail);
+    } catch {
+      // DB may be closed during shutdown
+    }
+    this.broadcastToWorkspace(workspace, {
+      kind: 'activity_entry',
+      entry: { timestamp: Date.now(), actor, action, detail },
+    });
   }
 
   private sendBoard(ws: WebSocket, workspace: Workspace): void {
@@ -848,6 +959,18 @@ export class TandemHub {
     for (const u of dead) {
       workspace.peers.delete(u);
       process.stderr.write(`[hub] Pruned dead peer "${u}"\n`);
+    }
+    // Forward to all dashboard observers
+    const deadDashboards: WebSocket[] = [];
+    for (const dws of workspace.dashboards) {
+      if (dws.readyState === WebSocket.OPEN) {
+        this.send(dws, msg);
+      } else {
+        deadDashboards.push(dws);
+      }
+    }
+    for (const dws of deadDashboards) {
+      workspace.dashboards.delete(dws);
     }
   }
 
@@ -908,7 +1031,12 @@ export class TandemHub {
       for (const peer of workspace.peers.values()) {
         peer.ws.close();
       }
+      for (const dws of workspace.dashboards) {
+        dws.close();
+      }
+      workspace.dashboards.clear();
     }
     this.wss?.close();
+    this.httpServer?.close();
   }
 }

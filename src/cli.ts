@@ -5,6 +5,7 @@ import { saveUsername, loadUsername, clearWorkspaceConfig, cleanStaleSessions } 
 import { findRunningHub, stopHub } from './shared/hub-lifecycle.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -109,6 +110,9 @@ function cmdHub(): void {
       console.log(`  Workspace: ${info.workspaceName} (${info.workspaceId})`);
       console.log(`  Local:     ${info.localUrl}`);
       console.log(`  Tunnel:    ${info.tunnelUrl ?? 'none (local-only mode)'}`);
+      console.log(
+        `  Dashboard: ${info.dashboardUrl ?? `http://127.0.0.1:${info.port}/dashboard?token=${encodeURIComponent(info.token)}`}`,
+      );
       console.log(`  Uptime:    ${uptimeStr}`);
       console.log(`  Max peers: ${info.maxPeers}`);
       break;
@@ -135,11 +139,25 @@ function cmdHub(): void {
       console.log(tail);
       break;
     }
+    case 'dashboard': {
+      const info = findRunningHub();
+      if (!info) {
+        console.log('  No hub daemon running. Start one with: intandem init');
+        return;
+      }
+      const url =
+        info.dashboardUrl ?? `http://127.0.0.1:${info.port}/dashboard?token=${encodeURIComponent(info.token)}`;
+      console.log(`  Opening dashboard: ${url}`);
+      const openCmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+      spawn(openCmd, [url], { detached: true, stdio: 'ignore' }).unref();
+      break;
+    }
     default:
       console.log(`  Usage:`);
       console.log(`    intandem hub status          Show running hub daemon info`);
       console.log(`    intandem hub stop            Stop the hub daemon`);
       console.log(`    intandem hub logs            Show recent hub daemon logs`);
+      console.log(`    intandem hub dashboard       Open the workspace dashboard in a browser`);
       break;
   }
 }
@@ -157,6 +175,7 @@ function printHelp(): void {
   console.log(`    intandem hub status          Show running hub daemon info`);
   console.log(`    intandem hub stop            Stop the hub daemon`);
   console.log(`    intandem hub logs            Show recent hub daemon logs`);
+  console.log(`    intandem hub dashboard       Open the workspace dashboard in a browser`);
   console.log();
   console.log(`  Usage:`);
   console.log();

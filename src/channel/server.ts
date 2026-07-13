@@ -149,10 +149,12 @@ export async function startChannelServer(): Promise<void> {
         });
 
         // Send connection context so Claude knows what to do
+        const hubInfo = findRunningHub();
+        const dashboardLine = hubInfo?.dashboardUrl ? `\nDashboard: ${hubInfo.dashboardUrl}` : '';
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
-            content: `CONNECTED to workspace "${state.workspaceName}" as "${state.myUsername}". Peers online: ${state.currentPeers.join(', ') || 'none yet'}.\n\nIMPORTANT — do these now:\n1. Call intandem_board to see tasks and assignments\n2. Claim an unclaimed task with intandem_claim_task\n3. Announce yourself with intandem_send (type: "status")`,
+            content: `CONNECTED to workspace "${state.workspaceName}" as "${state.myUsername}". Peers online: ${state.currentPeers.join(', ') || 'none yet'}.${dashboardLine}\n\nIMPORTANT — do these now:\n1. Call intandem_board to see tasks and assignments\n2. Claim an unclaimed task with intandem_claim_task\n3. Announce yourself with intandem_send (type: "status")`,
             meta: { type: 'status', event: 'connected' },
           },
         });
