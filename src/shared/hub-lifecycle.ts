@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync, unlinkSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, existsSync, unlinkSync, mkdirSync, openSync, closeSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -66,6 +66,8 @@ export async function spawnHub(opts: {
 
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  } else {
+    chmodSync(CONFIG_DIR, 0o700);
   }
 
   const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,7 +84,7 @@ export async function spawnHub(opts: {
   cliArgs.push('--name', opts.name, '--max-peers', String(opts.maxPeers ?? 5));
 
   const logFile = join(CONFIG_DIR, 'hub.log');
-  const logFd = openSync(logFile, 'a');
+  const logFd = openSync(logFile, 'a', 0o600);
 
   const child = spawn(process.execPath, [cliPath, ...cliArgs], {
     detached: true,

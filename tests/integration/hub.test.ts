@@ -655,6 +655,210 @@ describe('file locks', () => {
 
 // ─── Dashboard ──────────────────────────────────────────────────────
 
+// ─── Security hardening ─────────────────────────────────────────────
+
+describe('security hardening', () => {
+  describe('dashboard security headers', () => {
+    it('includes X-Frame-Options DENY', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=${encodeURIComponent(th.token)}`);
+      expect(res.headers.get('x-frame-options')).toBe('DENY');
+    });
+
+    it('includes X-Content-Type-Options nosniff', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=${encodeURIComponent(th.token)}`);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    });
+
+    it('includes Referrer-Policy no-referrer', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=${encodeURIComponent(th.token)}`);
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    });
+
+    it('includes Cache-Control no-store', async () => {
+      const res = await fetch(`http://127.0.0.1:${th.port}/dashboard?token=${encodeURIComponent(th.token)}`);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+    });
+  });
+
+  describe('username validation', () => {
+    it('rejects username longer than 32 characters', async () => {
+      const longName = 'A'.repeat(33);
+      const { ws, msg } = await connectAndAuth(th.url, th.token, longName);
+      expect(msg.kind).toBe('auth_fail');
+      if (msg.kind === 'auth_fail') {
+        expect(msg.reason).toContain('too long');
+      }
+      ws.close();
+    });
+
+    it('rejects username with invalid characters', async () => {
+      const { ws, msg } = await connectAndAuth(th.url, th.token, 'user@evil.com');
+      expect(msg.kind).toBe('auth_fail');
+      if (msg.kind === 'auth_fail') {
+        expect(msg.reason).toContain('alphanumeric');
+      }
+      ws.close();
+    });
+
+    it('rejects username with spaces', async () => {
+      const { ws, msg } = await connectAndAuth(th.url, th.token, 'has space');
+      expect(msg.kind).toBe('auth_fail');
+      ws.close();
+    });
+
+    it('accepts valid username with dashes and underscores', async () => {
+      const { ws, msg } = await connectAndAuth(th.url, th.token, 'valid_user-123');
+      expect(msg.kind).toBe('auth_ok');
+      ws.close();
+    });
+
+    it('accepts 32-character username', async () => {
+      const { ws, msg } = await connectAndAuth(th.url, th.token, 'A'.repeat(32));
+      expect(msg.kind).toBe('auth_ok');
+      ws.close();
+    });
+  });
+
+  describe('entity caps', () => {
+    it('rejects tasks beyond 500 limit', async () => {
+      const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+
+      // Insert 500 tasks directly via the hub's workspace db
+      const workspace = (th.hub as any).workspaces.values().next().value;
+      for (let i = 0; i < 500; i++) {
+        workspace.db.createTask({
+          id: `task-${i}`,
+          title: `Task ${i}`,
+          status: 'open',
+          priority: 'medium',
+          createdBy: 'Alice',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      }
+
+      // The 501st should be rejected
+      sendMsg(ws, {
+        kind: 'board_update',
+        task: {
+          id: 'task-overflow',
+          title: 'One too many',
+          status: 'open',
+          priority: 'medium',
+          createdBy: 'Alice',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      });
+      const err = await waitFor(ws, (m) => m.kind === 'error');
+      expect(err.kind).toBe('error');
+      if (err.kind === 'error') {
+        expect(err.message).toContain('Task limit');
+      }
+      ws.close();
+    });
+
+    it('still allows updating existing tasks at the cap', async () => {
+      const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+      const workspace = (th.hub as any).workspaces.values().next().value;
+      for (let i = 0; i < 500; i++) {
+        workspace.db.createTask({
+          id: `task-${i}`,
+          title: `Task ${i}`,
+          status: 'open',
+          priority: 'medium',
+          createdBy: 'Alice',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      }
+
+      // Updating an existing task should still work
+      sendMsg(ws, {
+        kind: 'board_update',
+        task: {
+          id: 'task-0',
+          title: 'Updated task',
+          status: 'claimed',
+          assignee: 'Alice',
+          priority: 'medium',
+          createdBy: 'Alice',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      });
+      const update = await waitFor(ws, (m) => m.kind === 'board_update');
+      expect(update.kind).toBe('board_update');
+      ws.close();
+    });
+
+    it('rejects findings beyond 500 limit', async () => {
+      const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+      const workspace = (th.hub as any).workspaces.values().next().value;
+      for (let i = 0; i < 500; i++) {
+        workspace.db.createFinding({
+          id: `finding-${i}`,
+          service: 'test',
+          severity: 'low',
+          summary: `Finding ${i}`,
+          reportedBy: 'Alice',
+          timestamp: Date.now(),
+        });
+      }
+
+      sendMsg(ws, {
+        kind: 'finding_submit',
+        finding: {
+          id: 'finding-overflow',
+          service: 'test',
+          severity: 'low',
+          summary: 'One too many',
+          reportedBy: 'Alice',
+          timestamp: Date.now(),
+        },
+      });
+      const err = await waitFor(ws, (m) => m.kind === 'error');
+      expect(err.kind).toBe('error');
+      if (err.kind === 'error') {
+        expect(err.message).toContain('Finding limit');
+      }
+      ws.close();
+    });
+
+    it('rejects new variables beyond 100 limit', async () => {
+      const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+      const workspace = (th.hub as any).workspaces.values().next().value;
+      for (let i = 0; i < 100; i++) {
+        workspace.db.setVar(`key-${i}`, `value-${i}`, 'Alice');
+      }
+
+      sendMsg(ws, { kind: 'var_set', key: 'key-overflow', value: 'nope', setBy: 'Alice' });
+      const err = await waitFor(ws, (m) => m.kind === 'error');
+      expect(err.kind).toBe('error');
+      if (err.kind === 'error') {
+        expect(err.message).toContain('Variable limit');
+      }
+      ws.close();
+    });
+
+    it('still allows updating existing variables at the cap', async () => {
+      const { ws } = await connectAndAuth(th.url, th.token, 'Alice');
+      const workspace = (th.hub as any).workspaces.values().next().value;
+      for (let i = 0; i < 100; i++) {
+        workspace.db.setVar(`key-${i}`, `value-${i}`, 'Alice');
+      }
+
+      sendMsg(ws, { kind: 'var_set', key: 'key-0', value: 'updated', setBy: 'Alice' });
+      const update = await waitFor(ws, (m) => m.kind === 'var_set');
+      expect(update.kind).toBe('var_set');
+      if (update.kind === 'var_set') {
+        expect(update.value).toBe('updated');
+      }
+      ws.close();
+    });
+  });
+});
+
 describe('dashboard', () => {
   describe('HTTP endpoint', () => {
     it('returns 401 without token', async () => {

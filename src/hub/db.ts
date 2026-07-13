@@ -206,6 +206,18 @@ export class TandemDB {
     return rows.map(rowToTask);
   }
 
+  taskCount(): number {
+    return (this.db.prepare('SELECT COUNT(*) as count FROM tasks').get() as { count: number }).count;
+  }
+
+  findingCount(): number {
+    return (this.db.prepare('SELECT COUNT(*) as count FROM findings').get() as { count: number }).count;
+  }
+
+  varCount(): number {
+    return (this.db.prepare('SELECT COUNT(*) as count FROM vars').get() as { count: number }).count;
+  }
+
   logMessage(msg: { type: string; from: string; to?: string; content: string; timestamp: number }): void {
     this.db
       .prepare(

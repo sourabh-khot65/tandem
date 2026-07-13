@@ -183,7 +183,13 @@ export class TandemHub {
         return;
       }
 
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'X-Frame-Options': 'DENY',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'Cache-Control': 'no-store',
+      });
       res.end(getDashboardHtml(targetWorkspace.name));
       return;
     }
@@ -388,6 +394,20 @@ export class TandemHub {
       this.send(ws, { kind: 'auth_fail', reason: 'Invalid token' });
       ws.close();
       return;
+    }
+
+    // Validate username: max 32 chars, alphanumeric + dashes/underscores (except __dashboard__)
+    if (msg.username !== '__dashboard__') {
+      if (msg.username.length > 32) {
+        this.send(ws, { kind: 'auth_fail', reason: 'Username too long (max 32 characters)' });
+        ws.close();
+        return;
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(msg.username)) {
+        this.send(ws, { kind: 'auth_fail', reason: 'Username must be alphanumeric, dashes, or underscores' });
+        ws.close();
+        return;
+      }
     }
 
     // Dashboard observer — read-only, no peer slot
@@ -595,6 +615,10 @@ export class TandemHub {
     }
 
     const existing = workspace.db.getTask(task.id);
+    if (!existing && workspace.db.taskCount() >= 500) {
+      this.send(ws, { kind: 'error', message: 'Task limit reached (max 500 per workspace)' });
+      return;
+    }
     if (existing) {
       // Authorization: who can modify this task?
       const isCreator = existing.createdBy === from;
@@ -738,6 +762,11 @@ export class TandemHub {
       this.send(ws, { kind: 'error', message: 'Variable value too long (max 5000 chars)' });
       return;
     }
+    const isNew = !workspace.db.getVar(key);
+    if (isNew && workspace.db.varCount() >= 100) {
+      this.send(ws, { kind: 'error', message: 'Variable limit reached (max 100 per workspace)' });
+      return;
+    }
     workspace.db.setVar(key, value, from);
     this.broadcastToWorkspace(workspace, { kind: 'var_set', key, value, setBy: from });
   }
@@ -765,6 +794,10 @@ export class TandemHub {
     finding: import('../shared/types.js').Finding,
   ): void {
     try {
+      if (workspace.db.findingCount() >= 500) {
+        this.send(ws, { kind: 'error', message: 'Finding limit reached (max 500 per workspace)' });
+        return;
+      }
       finding.reportedBy = from; // enforce identity
       workspace.db.createFinding(finding);
       this.broadcastActivity(

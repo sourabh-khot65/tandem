@@ -558,7 +558,7 @@ function handleShare(args: Record<string, unknown>, conn: HubConnection, state: 
   } catch {
     return text(`File not found: ${file}`);
   }
-  if (!realPath.startsWith(cwd)) {
+  if (realPath !== cwd && !realPath.startsWith(cwd + '/')) {
     return text(`Access denied: file must be within the project directory.`);
   }
 
@@ -780,7 +780,6 @@ function generateSessionSummary(state: ChannelState): string {
   const durationStr =
     duration > 0 ? `${Math.floor(duration / 60_000)}m ${Math.floor((duration % 60_000) / 1000)}s` : 'unknown';
   const totalCalls = s.intandemToolCallCount;
-  const overheadPct = totalCalls > 0 ? Math.round((totalCalls / (totalCalls + s.messagesSent)) * 100) : 0;
 
   const lines = [
     `Session Summary for "${state.workspaceName}":`,

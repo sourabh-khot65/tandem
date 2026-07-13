@@ -139,7 +139,7 @@ export async function startHubDaemon(opts: DaemonArgs): Promise<void> {
   };
 
   writeHubFile(info);
-  log(`Dashboard: ${dashboardUrl}`);
+  log(`Dashboard ready on port ${port}`);
   log('Hub file written');
 
   // Start tunnel in background — don't block the daemon startup
