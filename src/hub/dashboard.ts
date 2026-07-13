@@ -13,6 +13,7 @@ export function getDashboardHtml(workspaceName: string): string {
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' fill='%230b0c0a'/><circle cx='9' cy='12' r='6' fill='none' stroke='%235fe39a' stroke-width='3'/><circle cx='16' cy='12' r='6' fill='none' stroke='%2359c2ff' stroke-width='3' opacity='.9'/></svg>">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none!important}
 
 :root {
   --bg: #0b0c0a;
@@ -226,7 +227,7 @@ button,input{font-family:inherit}
 .spec-type{color:var(--purple);font-size:.8rem}
 .spec-row{cursor:pointer}
 .spec-caret{display:inline-block;color:var(--faint);margin-right:8px;transition:transform .15s}
-.spec-row.expanded .spec-caret{transform:rotate(90deg)}
+.expanded .spec-caret{transform:rotate(90deg)}
 .spec-detail td{padding-top:2px}
 .spec-pre{font-size:.8rem;color:var(--dim);white-space:pre-wrap;word-break:break-word;border-left:2px solid var(--line);padding:6px 0 6px 14px;margin:2px 0 8px 12px;max-height:280px;overflow:auto;line-height:1.55}
 .rv{margin-right:12px;font-size:.8rem;white-space:nowrap}
@@ -236,6 +237,50 @@ button,input{font-family:inherit}
 .cons .cf{color:var(--accent)}
 
 .sum-row{display:flex;gap:16px;padding:2px 4px 10px;font-size:.8rem;flex-wrap:wrap}
+
+/* ── Peer focus ── */
+.pn{cursor:pointer}
+.pn:hover{text-decoration:underline}
+.peer.pn:hover{text-decoration:none}
+.peer.focused{background:var(--accent-d)}
+.peer.dimmed{opacity:.45}
+.focus-bar{display:flex;align-items:baseline;gap:10px;padding:4px 16px;border-bottom:1px solid var(--line);background:var(--accent-d);font-size:.8rem;color:var(--dim);flex-shrink:0}
+.fb-hint{color:var(--faint);font-size:.74rem}
+
+/* ── Expandable details ── */
+.t-card.expandable{cursor:pointer}
+.t-desc{font-size:.78rem;color:var(--dim);margin-top:5px;line-height:1.55;word-break:break-word}
+.t-deps{font-size:.74rem;margin-top:4px;color:var(--faint)}
+.t-deps .dep-done{color:var(--green)}
+.t-deps .dep-open{color:var(--amber)}
+.fd-row.expandable{cursor:pointer}
+.fd-detail td{padding-top:0}
+.fd-box{border-left:2px solid var(--line);padding:4px 0 5px 14px;margin:2px 0 8px 2px;font-size:.8rem;color:var(--ink);line-height:1.6}
+.fd-meta{color:var(--faint);font-size:.74rem}
+.fd-pat{color:var(--dim);font-size:.78rem}
+.hit{animation:rowIn 1.4s ease}
+
+/* ── Global search ── */
+.search-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:90;display:flex;align-items:flex-start;justify-content:center;padding-top:11vh}
+:root[data-theme="light"] .search-ov{background:rgba(40,40,30,.25)}
+.search-box{width:min(680px,92vw);background:var(--panel);border:1px solid var(--line);box-shadow:0 12px 40px rgba(0,0,0,.35)}
+.search-line{display:flex;gap:9px;padding:10px 14px;border-bottom:1px solid var(--line);color:var(--accent);align-items:baseline}
+.search-line input{flex:1;background:none;border:none;outline:none;color:var(--ink);font:inherit;font-size:.95rem}
+.search-line input::placeholder{color:var(--faint)}
+.search-ct{color:var(--faint);font-size:.76rem;white-space:nowrap}
+.search-res{max-height:52vh;overflow-y:auto;padding:5px 0 8px}
+.sr-grp{padding:8px 14px 3px;font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+.sr-item{display:flex;gap:10px;padding:4px 14px;cursor:pointer;align-items:baseline}
+.sr-item.sel,.sr-item:hover{background:var(--accent-d)}
+.sr-ic{width:15px;color:var(--faint);flex-shrink:0;text-align:center}
+.sr-p{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sr-s{color:var(--faint);font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-left:auto;max-width:38%;flex-shrink:0}
+.sr-hint{padding:7px 14px;border-top:1px solid var(--line-2);color:var(--faint);font-size:.72rem}
+
+/* ── Command line ── */
+.sbar-cmd{display:flex;align-items:baseline;gap:3px;flex:1;color:var(--accent)}
+.sbar-cmd input{flex:1;background:none;border:none;outline:none;color:var(--ink);font:inherit;font-size:.82rem}
+.sbar-key{color:var(--faint);font-size:.72rem;flex-shrink:0}
 
 /* ── Empty ── */
 .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:48px 20px;text-align:center}
@@ -279,6 +324,14 @@ button,input{font-family:inherit}
 <body>
 
 <div class="toast-area" id="toasts"></div>
+
+<div class="search-ov" id="searchOv" hidden>
+  <div class="search-box">
+    <div class="search-line">/<input id="searchIn" placeholder="search tasks, findings, specs, messages, vars, activity" spellcheck="false" aria-label="Global search"><span class="search-ct" id="searchCt"></span></div>
+    <div class="search-res" id="searchRes"></div>
+    <div class="sr-hint">&#x2191;&#x2193; navigate &#xB7; enter jump &#xB7; esc close</div>
+  </div>
+</div>
 
 <div class="topbar" id="topbar">
   <svg class="logo" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="9" cy="12" r="6" fill="none" stroke="var(--accent)" stroke-width="2.4"/><circle cx="15.5" cy="12" r="6" fill="none" stroke="var(--blue)" stroke-width="2.4" opacity=".8"/></svg>
@@ -336,6 +389,8 @@ button,input{font-family:inherit}
       <button class="tab-btn" data-tab="messages" role="tab" aria-selected="false"><span class="k">7</span>messages <span class="tab-ct" id="tcM">0</span></button>
     </div>
 
+    <div class="focus-bar" id="focusBar" hidden></div>
+
     <div class="tab-panel active" id="panelActivity" role="tabpanel">
       <div class="feed-bar">
         <span class="feed-ct" id="feedCt">0 events</span>
@@ -360,13 +415,13 @@ button,input{font-family:inherit}
   </div>
 </div>
 
-<div class="sbar"><span class="sbar-mark">&#x258C;</span><span class="sbar-text" id="sbarText">ready</span></div>
+<div class="sbar"><span class="sbar-mark">&#x258C;</span><span class="sbar-text" id="sbarText">ready</span><span class="sbar-cmd" id="cmdWrap" hidden>:<input id="cmdIn" spellcheck="false" aria-label="Command"></span><span class="sbar-key">/ search &#xB7; : cmd</span></div>
 
 <script>
 (function(){
   let state={workspace:null,peers:[],tasks:[],locks:[],findings:[],specs:[],vars:[],activity:[],messages:[]};
   let ws=null,reconnectDelay=1000,reconnectTimer=null,lostTimer=null,startedAt=Date.now();
-  let expandedSpecs={},actFilter='';
+  let expandedSpecs={},expandedTasks={},expandedFindings={},actFilter='',peerFocus=null;
 
   const $=id=>document.getElementById(id);
   const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML};
@@ -421,7 +476,9 @@ button,input{font-family:inherit}
   document.addEventListener('keydown',e=>{
     if(e.metaKey||e.ctrlKey||e.altKey)return;
     if(e.target&&(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'))return;
-    if(e.key==='/'){e.preventDefault();switchTab('activity');$('actFilterIn').focus();return}
+    if(e.key==='/'){e.preventDefault();openSearch();return}
+    if(e.key===':'){e.preventDefault();openCmd();return}
+    if(e.key==='Escape'&&peerFocus){toggleFocus(peerFocus);return}
     const i=parseInt(e.key,10)-1;
     if(i>=0&&i<tabOrder.length)switchTab(tabOrder[i]);
   });
@@ -467,8 +524,47 @@ button,input{font-family:inherit}
     if(el.textContent!==s){el.textContent=s;el.classList.remove('pop');void el.offsetWidth;el.classList.add('pop')}
   }
   function who(n){
-    return '<span style="color:'+colorFor(n)+'">'+esc(n)+'</span>';
+    return '<span class="pn" data-n="'+esc(n)+'" style="color:'+colorFor(n)+'" title="Click to focus">'+esc(n)+'</span>';
   }
+
+  // Peer focus: V() returns state filtered to the focused peer
+  function V(){
+    if(!peerFocus)return state;
+    const f=peerFocus;
+    return {
+      workspace:state.workspace,peers:state.peers,
+      tasks:state.tasks.filter(t=>t.assignee===f||t.createdBy===f),
+      locks:state.locks.filter(l=>l.lockedBy===f),
+      findings:state.findings.filter(x=>x.reportedBy===f),
+      specs:state.specs.filter(s=>s.proposedBy===f||(s.reviews||[]).some(r=>r.reviewer===f)),
+      vars:state.vars.filter(x=>x.setBy===f),
+      messages:state.messages.filter(m=>m.from===f||m.to===f),
+      activity:state.activity.filter(a=>a.actor===f)
+    };
+  }
+  function emptyFor(what){
+    return emptyHtml('nothing for '+esc(peerFocus)+' here',what+' \\u2014 esc to clear focus');
+  }
+  function updateFocusBar(){
+    const bar=$('focusBar');
+    if(!peerFocus){bar.hidden=true;return}
+    bar.hidden=false;
+    bar.innerHTML='<span style="color:'+colorFor(peerFocus)+'">\\u25C9 '+esc(peerFocus)+'</span>'+
+      '<span>showing only this peer\\u2019s items</span><span class="flex1"></span>'+
+      '<span class="fb-hint">esc or click name again to clear</span>';
+  }
+  function toggleFocus(n){
+    peerFocus=peerFocus===n?null:n;
+    updateFocusBar();
+    renderAll();
+    sbar(peerFocus?'focus: '+peerFocus:'focus cleared');
+  }
+  document.addEventListener('click',e=>{
+    const p=e.target.closest('.pn');
+    if(!p)return;
+    const n=p.getAttribute('data-n');
+    if(n)toggleFocus(n);
+  });
 
   // Render: Peers
   function renderPeers(){
@@ -478,7 +574,8 @@ button,input{font-family:inherit}
     }else{
       list.innerHTML=state.peers.map(p=>{
         const c=colorFor(p.username);
-        let h='<div class="peer"><span class="peer-blk" style="color:'+c+'">\\u258A</span>'+
+        const cls='peer pn'+(peerFocus?(p.username===peerFocus?' focused':' dimmed'):'');
+        let h='<div class="'+cls+'" data-n="'+esc(p.username)+'" title="Click to focus"><span class="peer-blk" style="color:'+c+'">\\u258A</span>'+
           '<span class="peer-name">'+esc(p.username)+'</span>'+
           '<span class="peer-time">'+dur(Date.now()-p.connectedAt)+'</span></div>';
         if(p.workingOn)h+='<div class="peer-sub" title="'+esc(p.workingOn)+'">\\u2514 '+esc(p.workingOn)+'</div>';
@@ -492,13 +589,14 @@ button,input{font-family:inherit}
 
   // Render: Stats
   function renderStats(){
-    const active=state.tasks.filter(t=>t.status!=='done').length;
-    setNum('sT',active);setNum('sL',state.locks.length);setNum('sF',state.findings.length);
-    setNum('sSp',state.specs.length);setNum('sV',state.vars.length);setNum('sM',state.messages.length);
-    setNum('tcA',state.activity.length);setNum('tcT',state.tasks.length);setNum('tcL',state.locks.length);
-    setNum('tcF',state.findings.length);setNum('tcSp',state.specs.length);setNum('tcV',state.vars.length);setNum('tcM',state.messages.length);
-    $('mTasks').textContent=active;$('mLocks').textContent=state.locks.length;
-    $('mFindings').textContent=state.findings.length;$('mSpecs').textContent=state.specs.length;
+    const v=V();
+    const active=v.tasks.filter(t=>t.status!=='done').length;
+    setNum('sT',active);setNum('sL',v.locks.length);setNum('sF',v.findings.length);
+    setNum('sSp',v.specs.length);setNum('sV',v.vars.length);setNum('sM',v.messages.length);
+    setNum('tcA',v.activity.length);setNum('tcT',v.tasks.length);setNum('tcL',v.locks.length);
+    setNum('tcF',v.findings.length);setNum('tcSp',v.specs.length);setNum('tcV',v.vars.length);setNum('tcM',v.messages.length);
+    $('mTasks').textContent=active;$('mLocks').textContent=v.locks.length;
+    $('mFindings').textContent=v.findings.length;$('mSpecs').textContent=v.specs.length;
   }
 
   // Render: Activity
@@ -515,26 +613,30 @@ button,input{font-family:inherit}
   function renderActivity(highlightLast){
     const feed=$('activityFeed'),panel=$('panelActivity');
     const nearBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<90;
-    const rows=state.activity.map((e,i)=>({e,i})).filter(x=>{
+    const all=V().activity;
+    const rows=all.filter(e=>{
       if(!actFilter)return true;
-      return (x.e.actor+' '+x.e.action+' '+(x.e.detail||'')).toLowerCase().indexOf(actFilter)>=0;
+      return (e.actor+' '+e.action+' '+(e.detail||'')).toLowerCase().indexOf(actFilter)>=0;
     });
-    $('feedCt').textContent=actFilter?rows.length+'/'+state.activity.length+' events':state.activity.length+' events';
+    $('feedCt').textContent=(actFilter||peerFocus)?rows.length+'/'+state.activity.length+' events':state.activity.length+' events';
     if(!state.activity.length){
       feed.innerHTML=emptyHtml('no activity yet','peer actions \\u2014 joins, tasks, locks, specs \\u2014 stream here in real time');
     }else if(!rows.length){
-      feed.innerHTML=emptyHtml('no matches','nothing matches \\u201C'+esc(actFilter)+'\\u201D \\u2014 esc to clear');
+      feed.innerHTML=peerFocus&&!actFilter?emptyFor('no activity from them yet')
+        :emptyHtml('no matches','nothing matches \\u201C'+esc(actFilter)+'\\u201D \\u2014 esc to clear');
     }else{
-      feed.innerHTML=rows.map(x=>{
-        const e=x.e,sys=e.actor==='system';
+      const last=state.activity[state.activity.length-1];
+      feed.innerHTML=rows.map(e=>{
+        const sys=e.actor==='system';
         const c=sys?'var(--purple)':colorFor(e.actor);
         const cat=catFor(e.action);
         const txt=e.action+(e.detail?' '+e.detail:'');
         const hi=esc(txt).replace(/\\[([^\\]]+)\\]/g,'<span class="hl">[$1]</span>');
-        const nw=(highlightLast&&x.i===state.activity.length-1)?' new':'';
+        const nw=(highlightLast&&e===last)?' new':'';
+        const pn=sys?'':' pn" data-n="'+esc(e.actor);
         return '<div class="feed-row'+nw+'"><span class="feed-ts">'+fmtTime(e.timestamp)+'</span>'+
           '<span class="feed-ic" style="color:'+cat[1]+'">'+cat[0]+'</span>'+
-          '<span class="feed-who" style="color:'+c+'">'+esc(e.actor)+'</span>'+
+          '<span class="feed-who'+pn+'" style="color:'+c+'">'+esc(e.actor)+'</span>'+
           '<span class="feed-what">'+hi+'</span></div>';
       }).join('');
       if(nearBottom||highlightLast===undefined)panel.scrollTop=panel.scrollHeight;
@@ -544,16 +646,32 @@ button,input{font-family:inherit}
   // Render: Tasks
   function renderTasks(){
     const bk={open:[],blocked:[],claimed:[],in_progress:[],done:[]};
-    for(const t of state.tasks)(bk[t.status]||bk.open).push(t);
+    for(const t of V().tasks)(bk[t.status]||bk.open).push(t);
 
+    function depsLine(t){
+      if(!t.dependsOn||!t.dependsOn.length)return '';
+      const parts=t.dependsOn.map(id=>{
+        const d=state.tasks.find(x=>x.id===id);
+        const cls=d&&d.status==='done'?'dep-done':'dep-open';
+        return '<span class="'+cls+'">'+esc(id)+'</span>';
+      }).join(' ');
+      return '<div class="t-deps">\\u22B6 waits on '+parts+'</div>';
+    }
     function card(t){
-      let h='<div class="t-card '+t.status+'">';
-      h+='<div class="t-title">'+esc(t.title)+'</div><div class="t-meta">';
-      h+='<span class="t-id">'+esc(t.id)+'</span>';
+      const exp=expandedTasks[t.id];
+      const extra=!!(t.description||(t.result&&t.result.length>100));
+      let h='<div class="t-card '+t.status+(extra?' expandable':'')+(exp?' expanded':'')+'" data-tid="'+esc(t.id)+'">';
+      h+='<div class="t-title">'+(extra?'<span class="spec-caret">\\u25B8</span>':'')+esc(t.title)+'</div>';
+      h+=depsLine(t);
+      if(exp&&t.description)h+='<div class="t-desc">'+esc(t.description)+'</div>';
+      h+='<div class="t-meta"><span class="t-id">'+esc(t.id)+'</span>';
       if(t.priority)h+='<span class="t-pri '+t.priority+'">'+t.priority+'</span>';
       if(t.assignee)h+='<span>'+who(t.assignee)+'</span>';
       h+='</div>';
-      if(t.result&&t.status==='done')h+='<div class="t-res">'+esc(t.result.length>100?t.result.slice(0,100)+'\\u2026':t.result)+'</div>';
+      if(t.result&&t.status==='done'){
+        const r=exp?t.result:(t.result.length>100?t.result.slice(0,100)+'\\u2026':t.result);
+        h+='<div class="t-res">'+esc(r)+'</div>';
+      }
       return h+'</div>';
     }
 
@@ -569,12 +687,25 @@ button,input{font-family:inherit}
     col('colProgress',bk.in_progress,'var(--amber)','in progress');
     col('colDone',bk.done,'var(--green)','done');
   }
+  document.querySelector('.kanban').addEventListener('click',e=>{
+    if(e.target.closest('.pn'))return;
+    const c=e.target.closest('.t-card.expandable');
+    if(!c)return;
+    const id=c.getAttribute('data-tid');
+    expandedTasks[id]=!expandedTasks[id];
+    renderTasks();
+  });
 
   // Render: Locks
   function renderLocks(){
-    if(!state.locks.length){$('locksW').innerHTML=emptyHtml('no active file locks','peers take advisory locks before editing shared files \\u00B7 5 minute ttl');return}
+    const locks=V().locks;
+    if(!locks.length){
+      $('locksW').innerHTML=peerFocus&&state.locks.length?emptyFor('no locks held by them')
+        :emptyHtml('no active file locks','peers take advisory locks before editing shared files \\u00B7 5 minute ttl');
+      return;
+    }
     let h='<table class="dt"><thead><tr><th>file</th><th>held by</th><th>task</th><th>ttl</th></tr></thead><tbody>';
-    for(const l of state.locks){
+    for(const l of locks){
       const rem=Math.max(0,l.expiresAt-Date.now());
       const total=Math.max(1,l.expiresAt-l.lockedAt);
       const low=rem<60000;
@@ -589,25 +720,57 @@ button,input{font-family:inherit}
   const sevOrder={critical:0,high:1,medium:2,low:3,info:4};
   const sevGlyph={critical:'\\u25B2',high:'\\u25B2',medium:'\\u25CF',low:'\\u25CB',info:'\\u25E6'};
   function renderFindings(){
-    if(!state.findings.length){$('findingsW').innerHTML=emptyHtml('no findings reported','findings submitted with <code>intandem_report</code> land here, ranked by severity');return}
-    const sorted=[...state.findings].sort((a,b)=>(sevOrder[a.severity]??5)-(sevOrder[b.severity]??5));
+    const findings=V().findings;
+    if(!findings.length){
+      $('findingsW').innerHTML=peerFocus&&state.findings.length?emptyFor('no findings reported by them')
+        :emptyHtml('no findings reported','findings submitted with <code>intandem_report</code> land here, ranked by severity');
+      return;
+    }
+    const sorted=[...findings].sort((a,b)=>(sevOrder[a.severity]??5)-(sevOrder[b.severity]??5));
     const counts={};
-    for(const f of state.findings)counts[f.severity]=(counts[f.severity]||0)+1;
+    for(const f of findings)counts[f.severity]=(counts[f.severity]||0)+1;
     let h='<div class="sum-row">'+Object.keys(sevOrder).filter(k=>counts[k])
       .map(k=>'<span class="sev sev-'+k+'">'+sevGlyph[k]+' '+counts[k]+' '+k+'</span>').join('')+'</div>';
     h+='<table class="dt"><thead><tr><th>sev</th><th>service</th><th>summary</th><th>by</th></tr></thead><tbody>';
     for(const f of sorted){
-      h+='<tr><td><span class="sev sev-'+f.severity+'">'+sevGlyph[f.severity]+' '+f.severity+'</span></td>'+
+      const extra=!!(f.recommendation||(f.patterns&&f.patterns.length)||f.count!=null||f.category||f.taskId);
+      const exp=extra&&expandedFindings[f.id];
+      h+='<tr class="fd-row'+(extra?' expandable':'')+(exp?' expanded':'')+'" data-fid="'+esc(f.id)+'">'+
+        '<td>'+(extra?'<span class="spec-caret">\\u25B8</span>':'')+'<span class="sev sev-'+f.severity+'">'+sevGlyph[f.severity]+' '+f.severity+'</span></td>'+
         '<td class="dim">'+esc(f.service)+'</td><td>'+esc(f.summary)+'</td><td>'+who(f.reportedBy)+'</td></tr>';
+      if(exp){
+        let d='';
+        const meta=[];
+        if(f.category)meta.push('category: '+esc(f.category));
+        if(f.count!=null)meta.push('count: '+f.count);
+        if(f.taskId)meta.push('task: '+esc(f.taskId));
+        if(meta.length)d+='<div class="fd-meta">'+meta.join(' \\u00B7 ')+'</div>';
+        if(f.recommendation)d+='<div>'+esc(f.recommendation)+'</div>';
+        if(f.patterns&&f.patterns.length)d+=f.patterns.map(p=>'<div class="fd-pat">\\u25AA '+esc(p.pattern)+(p.count?' \\u00D7'+p.count:'')+'</div>').join('');
+        h+='<tr class="fd-detail"><td colspan="4"><div class="fd-box">'+d+'</div></td></tr>';
+      }
     }
     $('findingsW').innerHTML=h+'</tbody></table>';
   }
+  $('findingsW').addEventListener('click',e=>{
+    if(e.target.closest('.pn'))return;
+    const r=e.target.closest('.fd-row.expandable');
+    if(!r)return;
+    const id=r.getAttribute('data-fid');
+    expandedFindings[id]=!expandedFindings[id];
+    renderFindings();
+  });
 
   // Render: Vars
   function renderVars(){
-    if(!state.vars.length){$('varsW').innerHTML=emptyHtml('no shared variables','key\\u2013value pairs set with <code>intandem_set_var</code> are shared across all peers');return}
+    const vars=V().vars;
+    if(!vars.length){
+      $('varsW').innerHTML=peerFocus&&state.vars.length?emptyFor('no vars set by them')
+        :emptyHtml('no shared variables','key\\u2013value pairs set with <code>intandem_set_var</code> are shared across all peers');
+      return;
+    }
     let h='<table class="dt"><thead><tr><th>key</th><th>value</th><th>set by</th></tr></thead><tbody>';
-    for(const v of state.vars){
+    for(const v of vars){
       h+='<tr><td class="var-key">'+esc(v.key)+'</td><td><span class="var-val" title="'+esc(v.value)+'">'+esc(v.value)+'</span></td>'+
         '<td>'+who(v.setBy)+'</td></tr>';
     }
@@ -616,9 +779,14 @@ button,input{font-family:inherit}
 
   // Render: Messages
   function renderMessages(){
-    if(!state.messages.length){$('msgsW').innerHTML=emptyHtml('no recent messages','peer-to-peer messages \\u2014 questions, statuses, handoffs \\u2014 appear here');return}
+    const messages=V().messages;
+    if(!messages.length){
+      $('msgsW').innerHTML=peerFocus&&state.messages.length?emptyFor('no messages to or from them')
+        :emptyHtml('no recent messages','peer-to-peer messages \\u2014 questions, statuses, handoffs \\u2014 appear here');
+      return;
+    }
     let h='<table class="dt"><thead><tr><th>time</th><th>type</th><th>from</th><th>content</th></tr></thead><tbody>';
-    for(const m of state.messages){
+    for(const m of messages){
       const tc=['finding','task','handoff','question'].includes(m.type)?' '+m.type:'';
       const from=who(m.from)+(m.to?' <span class="dim">\\u2192</span> '+who(m.to):'');
       h+='<tr><td class="dim">'+fmtTime(m.timestamp)+'</td><td><span class="msg-t'+tc+'">'+esc(m.type)+'</span></td>'+
@@ -630,9 +798,14 @@ button,input{font-family:inherit}
   // Render: Specs
   const specGlyph={proposed:'\\u25CF',approved:'\\u2714',withdrawn:'\\u2715'};
   function renderSpecs(){
-    if(!state.specs.length){$('specsW').innerHTML=emptyHtml('no specs proposed','interface contracts proposed with <code>intandem_propose_spec</code> are negotiated here \\u2014 peers vote, consensus approves \\u00B7 click a row for content');return}
+    const specs=V().specs;
+    if(!specs.length){
+      $('specsW').innerHTML=peerFocus&&state.specs.length?emptyFor('no specs proposed or reviewed by them')
+        :emptyHtml('no specs proposed','interface contracts proposed with <code>intandem_propose_spec</code> are negotiated here \\u2014 peers vote, consensus approves \\u00B7 click a row for content');
+      return;
+    }
     let h='<table class="dt"><thead><tr><th>id</th><th>status</th><th>type</th><th>name</th><th>by</th><th>ver</th><th>reviews</th></tr></thead><tbody>';
-    state.specs.forEach(s=>{
+    specs.forEach(s=>{
       const reviews=s.reviews&&s.reviews.length
         ?s.reviews.map(r=>'<span class="rv '+(r.vote==='approve'?'ok':'chg')+'">'+(r.vote==='approve'?'\\u2713':'\\u270E')+esc(r.reviewer)+'</span>').join('')
         :'<span class="dim">\\u2014</span>';
@@ -657,6 +830,7 @@ button,input{font-family:inherit}
     $('specsW').innerHTML=h+'</tbody></table>';
   }
   $('specsW').addEventListener('click',e=>{
+    if(e.target.closest('.pn'))return;
     const r=e.target.closest('.spec-row');
     if(!r)return;
     const id=r.getAttribute('data-sid');
@@ -770,8 +944,121 @@ button,input{font-family:inherit}
     }
   }
 
+  // Command palette (:)
+  const cmdWrap=$('cmdWrap'),cmdIn=$('cmdIn');
+  function openCmd(){cmdWrap.hidden=false;$('sbarText').style.display='none';cmdIn.value='';cmdIn.focus()}
+  function closeCmd(){cmdWrap.hidden=true;$('sbarText').style.display='';cmdIn.blur()}
+  function runCmd(raw){
+    closeCmd();
+    const s=raw.trim();
+    if(!s)return;
+    const parts=s.split(/\\s+/),c=parts[0].toLowerCase(),arg=parts.slice(1).join(' ');
+    const n=parseInt(c,10);
+    const tab=tabOrder.find(t=>t.indexOf(c)===0);
+    if(!isNaN(n)&&n>=1&&n<=tabOrder.length){switchTab(tabOrder[n-1]);sbar(':'+tabOrder[n-1])}
+    else if(tab){switchTab(tab);sbar(':'+tab)}
+    else if(c==='light'||c==='dark'){theme=c;document.documentElement.setAttribute('data-theme',c);localStorage.setItem('intandem-theme',c);updateThemeIcon();sbar('theme: '+c)}
+    else if(c==='theme'){$('themeBtn').click();sbar('theme toggled')}
+    else if(c==='copy'){copyCode($('joinCode'));sbar('invite code copied')}
+    else if(c==='filter'){actFilter=arg.toLowerCase();$('actFilterIn').value=arg;switchTab('activity');renderActivity();sbar(arg?'filter: '+arg:'filter cleared')}
+    else if(c==='clear'){actFilter='';$('actFilterIn').value='';renderActivity();sbar('filter cleared')}
+    else if(c==='focus'){
+      if(arg)toggleFocus(arg);
+      else if(peerFocus)toggleFocus(peerFocus);
+      else sbar('usage: :focus <peer>');
+    }
+    else if(c==='help'){sbar(':<tab> \\u00B7 :1-7 \\u00B7 :light :dark \\u00B7 :copy \\u00B7 :filter <text> \\u00B7 :focus <peer> \\u00B7 :clear')}
+    else sbar('unknown command: '+c+' \\u2014 try :help');
+  }
+  cmdIn.addEventListener('keydown',e=>{
+    if(e.key==='Enter')runCmd(cmdIn.value);
+    else if(e.key==='Escape')closeCmd();
+    e.stopPropagation();
+  });
+
+  // Global search (/)
+  const searchOv=$('searchOv'),searchIn=$('searchIn'),searchRes=$('searchRes');
+  let sItems=[],sSel=0;
+  function searchIndex(){
+    const it=[];
+    state.tasks.forEach(t=>it.push({g:'tasks',tab:'tasks',ic:'\\u25B8',p:t.id+' '+t.title,s:t.assignee||t.status,
+      hay:(t.id+' '+t.title+' '+(t.description||'')+' '+(t.assignee||'')+' '+t.status).toLowerCase(),
+      sel:'[data-tid="'+t.id+'"]',ex:()=>{expandedTasks[t.id]=true;renderTasks()}}));
+    state.findings.forEach(f=>it.push({g:'findings',tab:'findings',ic:'!',p:f.summary,s:f.severity+' \\u00B7 '+f.service,
+      hay:(f.summary+' '+f.service+' '+f.severity+' '+(f.recommendation||'')+' '+(f.category||'')+' '+f.reportedBy).toLowerCase(),
+      sel:'[data-fid="'+f.id+'"]',ex:()=>{expandedFindings[f.id]=true;renderFindings()}}));
+    state.specs.forEach(sp=>it.push({g:'specs',tab:'specs',ic:'\\u2261',p:sp.id+' '+sp.name,s:sp.status,
+      hay:(sp.id+' '+sp.name+' '+sp.content+' '+sp.proposedBy+' '+sp.status+' '+sp.specType).toLowerCase(),
+      sel:'[data-sid="'+sp.id+'"]',ex:()=>{expandedSpecs[sp.id]=true;renderSpecs()}}));
+    state.locks.forEach(l=>it.push({g:'locks',tab:'locks',ic:'\\u2298',p:l.filePath,s:l.lockedBy,
+      hay:(l.filePath+' '+l.lockedBy+' '+(l.taskId||'')).toLowerCase()}));
+    state.vars.forEach(v=>it.push({g:'vars',tab:'vars',ic:'$',p:v.key,s:String(v.value).slice(0,40),
+      hay:(v.key+' '+v.value+' '+v.setBy).toLowerCase()}));
+    state.messages.forEach(m=>it.push({g:'messages',tab:'messages',ic:'\\u2709',p:m.content.slice(0,80),s:m.from+(m.to?' \\u2192 '+m.to:''),
+      hay:(m.type+' '+m.from+' '+(m.to||'')+' '+m.content).toLowerCase()}));
+    state.activity.forEach(a=>it.push({g:'activity',tab:'activity',ic:'\\u00B7',p:a.action+(a.detail?' '+a.detail:''),s:a.actor,
+      hay:(a.actor+' '+a.action+' '+(a.detail||'')).toLowerCase(),act:true}));
+    return it;
+  }
+  function renderSearch(q){
+    q=q.trim().toLowerCase();
+    const per={},out=[];
+    for(const it of searchIndex()){
+      if(q&&it.hay.indexOf(q)<0)continue;
+      per[it.g]=per[it.g]||0;
+      if(per[it.g]>=6)continue;
+      per[it.g]++;out.push(it);
+    }
+    sItems=out;sSel=0;
+    $('searchCt').textContent=out.length+(q?' matches':' items');
+    if(!out.length){searchRes.innerHTML='<div class="sr-grp">no matches</div>';return}
+    let h='',lastG='';
+    out.forEach((it,i)=>{
+      if(it.g!==lastG){h+='<div class="sr-grp">'+it.g+'</div>';lastG=it.g}
+      h+='<div class="sr-item'+(i===sSel?' sel':'')+'" data-i="'+i+'"><span class="sr-ic">'+it.ic+'</span><span class="sr-p">'+esc(it.p)+'</span><span class="sr-s">'+esc(it.s||'')+'</span></div>';
+    });
+    searchRes.innerHTML=h;
+  }
+  function moveSel(d){
+    if(!sItems.length)return;
+    sSel=(sSel+d+sItems.length)%sItems.length;
+    searchRes.querySelectorAll('.sr-item').forEach(el=>{
+      const on=parseInt(el.getAttribute('data-i'),10)===sSel;
+      el.classList.toggle('sel',on);
+      if(on)el.scrollIntoView({block:'nearest'});
+    });
+  }
+  function openSearch(){searchOv.hidden=false;searchIn.value='';renderSearch('');searchIn.focus()}
+  function closeSearch(){searchOv.hidden=true;searchIn.blur()}
+  function sJump(i){
+    const it=sItems[i];
+    if(!it)return;
+    const q=searchIn.value.trim();
+    closeSearch();
+    switchTab(it.tab);
+    if(it.act){actFilter=q.toLowerCase();$('actFilterIn').value=q;renderActivity();return}
+    if(it.ex)it.ex();
+    if(it.sel)requestAnimationFrame(()=>{
+      const el=document.querySelector(it.sel);
+      if(el){el.scrollIntoView({block:'center'});el.classList.remove('hit');void el.offsetWidth;el.classList.add('hit')}
+    });
+  }
+  searchIn.addEventListener('input',()=>renderSearch(searchIn.value));
+  searchIn.addEventListener('keydown',e=>{
+    if(e.key==='ArrowDown'){e.preventDefault();moveSel(1)}
+    else if(e.key==='ArrowUp'){e.preventDefault();moveSel(-1)}
+    else if(e.key==='Enter')sJump(sSel);
+    else if(e.key==='Escape')closeSearch();
+    e.stopPropagation();
+  });
+  searchRes.addEventListener('click',e=>{
+    const r=e.target.closest('.sr-item');
+    if(r)sJump(parseInt(r.getAttribute('data-i'),10));
+  });
+  searchOv.addEventListener('click',e=>{if(e.target===searchOv)closeSearch()});
+
   // Dev hook: lets tests and previews inject messages without a live hub
-  window.__tandem={handleMessage,setConn,switchTab};
+  window.__tandem={handleMessage,setConn,switchTab,openSearch,openCmd,toggleFocus};
 
   setInterval(()=>{renderPeers();renderLocks()},10000);
   connect();
