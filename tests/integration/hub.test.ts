@@ -1633,3 +1633,319 @@ describe('spec negotiation', () => {
     });
   });
 });
+
+// ─── Ownership Registry ──────────────────────────────────────────────
+
+describe('ownership registry', () => {
+  /** Claim patterns and wait for the point-to-point own_result. */
+  async function claimResult(ws: WebSocket, patterns: string[], note?: string): Promise<HubMessage> {
+    const resultP = waitFor(ws, (m) => m.kind === 'own_result');
+    sendMsg(ws, { kind: 'own_claim', patterns, note });
+    return resultP;
+  }
+
+  it('claims territory and broadcasts own_update to peers', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+
+    const updateP = waitFor(bob, (m) => m.kind === 'own_update');
+    const result = await claimResult(alice, ['src/cart/**'], 'cart module');
+    const update = await updateP;
+
+    expect(result.kind).toBe('own_result');
+    if (result.kind === 'own_result') expect(result.success).toBe(true);
+    expect(update.kind).toBe('own_update');
+    if (update.kind === 'own_update') {
+      expect(update.event).toBe('claimed');
+      expect(update.claim.pattern).toBe('src/cart/');
+      expect(update.claim.owner).toBe('Alice');
+      expect(update.claim.note).toBe('cart module');
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('rejects an exact path inside another peer prefix', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+
+    await claimResult(alice, ['src/cart/**']);
+    const result = await claimResult(bob, ['src/cart/totals.ts']);
+
+    expect(result.kind).toBe('own_result');
+    if (result.kind === 'own_result') {
+      expect(result.success).toBe(false);
+      expect(result.conflicts?.length).toBe(1);
+      expect(result.conflicts?.[0].owner).toBe('Alice');
+      expect(result.conflicts?.[0].pattern).toBe('src/cart/');
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('rejects nested prefixes and equal exacts, allows the cart/cartography boundary', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+
+    await claimResult(alice, ['src/cart/**', 'docs/readme.md']);
+
+    const nested = await claimResult(bob, ['src/**']);
+    expect(nested.kind === 'own_result' && nested.success).toBe(false);
+
+    const equalExact = await claimResult(bob, ['docs/readme.md']);
+    expect(equalExact.kind === 'own_result' && equalExact.success).toBe(false);
+
+    const sibling = await claimResult(bob, ['src/cartography/**']);
+    expect(sibling.kind === 'own_result' && sibling.success).toBe(true);
+
+    alice.close();
+    bob.close();
+  });
+
+  it('rejects overlaps within a single claim batch', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    const result = await claimResult(alice, ['src/cart/**', 'src/cart/totals.ts']);
+    expect(result.kind === 'own_result' && result.success).toBe(false);
+
+    alice.close();
+  });
+
+  it('re-claiming an identical pattern upserts the note and keeps createdAt', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    await claimResult(alice, ['src/cart/**'], 'first note');
+    const listP1 = waitFor(alice, (m) => m.kind === 'own_list');
+    sendMsg(alice, { kind: 'own_request' });
+    const list1 = await listP1;
+    const created = list1.kind === 'own_list' ? list1.claims[0].createdAt : 0;
+
+    await sleep(20);
+    const again = await claimResult(alice, ['src/cart/**'], 'second note');
+    expect(again.kind === 'own_result' && again.success).toBe(true);
+
+    const listP2 = waitFor(alice, (m) => m.kind === 'own_list');
+    sendMsg(alice, { kind: 'own_request' });
+    const list2 = await listP2;
+    if (list2.kind === 'own_list') {
+      expect(list2.claims.length).toBe(1);
+      expect(list2.claims[0].note).toBe('second note');
+      expect(list2.claims[0].createdAt).toBe(created);
+    }
+    alice.close();
+  });
+
+  it('releases a specific pattern and broadcasts; other claims survive', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+    await collect(bob, 100);
+
+    await claimResult(alice, ['src/cart/**', 'docs/**']);
+    await collect(bob, 100); // drain claim broadcasts
+
+    const updateP = waitFor(bob, (m) => m.kind === 'own_update' && m.event === 'released');
+    const releaseP = waitFor(alice, (m) => m.kind === 'own_result');
+    sendMsg(alice, { kind: 'own_release', patterns: ['src/cart/**'] });
+    const release = await releaseP;
+    const update = await updateP;
+
+    expect(release.kind === 'own_result' && release.success).toBe(true);
+    if (update.kind === 'own_update') expect(update.claim.pattern).toBe('src/cart/');
+
+    const listP = waitFor(alice, (m) => m.kind === 'own_list');
+    sendMsg(alice, { kind: 'own_request' });
+    const list = await listP;
+    if (list.kind === 'own_list') {
+      expect(list.claims.length).toBe(1);
+      expect(list.claims[0].pattern).toBe('docs/');
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('releases all claims when patterns are omitted', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    await claimResult(alice, ['src/cart/**', 'docs/**']);
+    const releaseP = waitFor(alice, (m) => m.kind === 'own_result');
+    sendMsg(alice, { kind: 'own_release' });
+    const release = await releaseP;
+    expect(release.kind === 'own_result' && release.success).toBe(true);
+
+    const listP = waitFor(alice, (m) => m.kind === 'own_list');
+    sendMsg(alice, { kind: 'own_request' });
+    const list = await listP;
+    if (list.kind === 'own_list') expect(list.claims).toEqual([]);
+    alice.close();
+  });
+
+  it('fails release of claims you do not hold', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+
+    await claimResult(alice, ['src/cart/**']);
+    const releaseP = waitFor(bob, (m) => m.kind === 'own_result');
+    sendMsg(bob, { kind: 'own_release', patterns: ['src/cart/**'] });
+    const release = await releaseP;
+    expect(release.kind === 'own_result' && release.success).toBe(false);
+
+    alice.close();
+    bob.close();
+  });
+
+  it('grants a foreign lock WITH a territory warning', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+    await collect(bob, 100);
+
+    await claimResult(alice, ['src/cart/**']);
+    const lockP = waitFor(bob, (m) => m.kind === 'lock_result');
+    sendMsg(bob, { kind: 'lock_acquire', filePath: 'src/cart/totals.ts' });
+    const lock = await lockP;
+
+    expect(lock.kind).toBe('lock_result');
+    if (lock.kind === 'lock_result') {
+      expect(lock.success).toBe(true);
+      expect(lock.territoryWarning).toEqual({ owner: 'Alice', pattern: 'src/cart/' });
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('does not warn when the owner locks inside their own territory', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    await claimResult(alice, ['src/cart/**']);
+    const lockP = waitFor(alice, (m) => m.kind === 'lock_result');
+    sendMsg(alice, { kind: 'lock_acquire', filePath: 'src/cart/totals.ts' });
+    const lock = await lockP;
+
+    if (lock.kind === 'lock_result') {
+      expect(lock.success).toBe(true);
+      expect(lock.territoryWarning).toBeUndefined();
+    }
+    alice.close();
+  });
+
+  it('notifies the owner with territory_notice on a foreign lock', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+
+    await claimResult(alice, ['src/cart/**']);
+    const noticeP = waitFor(alice, (m) => m.kind === 'territory_notice');
+    sendMsg(bob, { kind: 'lock_acquire', filePath: 'src/cart/totals.ts', taskId: 'T-9' });
+    const notice = await noticeP;
+
+    expect(notice.kind).toBe('territory_notice');
+    if (notice.kind === 'territory_notice') {
+      expect(notice.filePath).toBe('src/cart/totals.ts');
+      expect(notice.lockedBy).toBe('Bob');
+      expect(notice.pattern).toBe('src/cart/');
+      expect(notice.taskId).toBe('T-9');
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('claims survive owner disconnect while locks are released', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+    await collect(bob, 100);
+
+    await claimResult(alice, ['src/cart/**']);
+    const lockP = waitFor(alice, (m) => m.kind === 'lock_result');
+    sendMsg(alice, { kind: 'lock_acquire', filePath: 'src/cart/totals.ts' });
+    await lockP;
+    await collect(bob, 100); // drain broadcasts
+
+    const releasedP = waitFor(bob, (m) => m.kind === 'lock_update' && m.event === 'released');
+    alice.close();
+    await releasedP; // lock released on disconnect
+
+    const listP = waitFor(bob, (m) => m.kind === 'own_list');
+    sendMsg(bob, { kind: 'own_request' });
+    const list = await listP;
+    if (list.kind === 'own_list') {
+      expect(list.claims.length).toBe(1);
+      expect(list.claims[0].owner).toBe('Alice');
+    }
+    bob.close();
+  });
+
+  it('enforces the per-peer claim cap', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    const twenty = Array.from({ length: 20 }, (_, i) => `mod${i}/**`);
+    const ok = await claimResult(alice, twenty);
+    expect(ok.kind === 'own_result' && ok.success).toBe(true);
+
+    const over = await claimResult(alice, ['one-more/**']);
+    expect(over.kind === 'own_result' && over.success).toBe(false);
+    if (over.kind === 'own_result') expect(over.reason).toContain('limit');
+
+    alice.close();
+  });
+
+  it('rejects invalid patterns: absolute, traversal, whole-repo, empty', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+
+    for (const bad of ['/etc/passwd', '../secrets/**', '**', '']) {
+      const result = await claimResult(alice, [bad]);
+      expect(result.kind === 'own_result' && result.success).toBe(false);
+    }
+    const none = await claimResult(alice, []);
+    expect(none.kind === 'own_result' && none.success).toBe(false);
+
+    alice.close();
+  });
+
+  it('normalizes patterns and lock paths equivalently', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob', 'sess-bob');
+    await collect(alice, 100);
+    await collect(bob, 100);
+
+    await claimResult(alice, ['./src//cart/**']);
+    const lockP = waitFor(bob, (m) => m.kind === 'lock_result');
+    sendMsg(bob, { kind: 'lock_acquire', filePath: './src/cart/a.ts' });
+    const lock = await lockP;
+
+    if (lock.kind === 'lock_result') {
+      expect(lock.success).toBe(true);
+      expect(lock.territoryWarning?.owner).toBe('Alice');
+    }
+    alice.close();
+    bob.close();
+  });
+
+  it('includes claims in dashboard_sync and forwards own_update to dashboards', async () => {
+    const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+    await claimResult(alice, ['src/cart/**']);
+
+    const dash = new WebSocket(th.url);
+    dash.on('open', () => {
+      sendMsg(dash, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+    });
+    const sync = await waitFor(dash, (m) => m.kind === 'dashboard_sync');
+    if (sync.kind === 'dashboard_sync') {
+      expect(sync.claims.length).toBe(1);
+      expect(sync.claims[0].pattern).toBe('src/cart/');
+    }
+
+    const updateP = waitFor(dash, (m) => m.kind === 'own_update');
+    await claimResult(alice, ['docs/**']);
+    const update = await updateP;
+    expect(update.kind === 'own_update' && update.claim.pattern).toBe('docs/');
+
+    dash.close();
+    alice.close();
+  });
+});

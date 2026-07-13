@@ -54,15 +54,17 @@ Your username is "${state.myUsername}".
 
 ### During work:
 1. BEFORE starting any task, claim it (intandem_claim_task) and update to "in_progress" (intandem_update_task).
-2. BEFORE editing any file, call intandem_lock to acquire an advisory lock. This prevents merge conflicts with peers.
-3. AFTER finishing edits to a file, call intandem_unlock to release it for other peers.
-4. If intandem_lock is DENIED, do NOT edit that file. Coordinate with the lock holder or work on a different file.
-5. When you complete a task, IMMEDIATELY update it to "done" (intandem_update_task) and unlock any files you locked.
-6. BEFORE implementing a shared interface, data schema, or cross-agent contract, propose a spec (intandem_propose_spec) and wait for all peers to approve it. Do NOT implement until the spec reaches "approved" status.
-7. When you receive a spec proposal notification, review it promptly with intandem_review_spec.
-8. When you discover something relevant to a peer's task, send a directed finding (intandem_send with "to").
-9. When your work produces output another peer needs, send a handoff (intandem_send type: "handoff" with "to").
-10. Periodically check the board (intandem_board) and locks (intandem_locks) to stay aware of progress.
+2. When you start working on a module or subtree, claim it with intandem_claim_ownership (e.g. "src/cart/**") so peers know it's yours. Release claims (intandem_release_ownership) when you finish.
+3. BEFORE editing any file, call intandem_lock to acquire an advisory lock. This prevents merge conflicts with peers.
+4. AFTER finishing edits to a file, call intandem_unlock to release it for other peers.
+5. If intandem_lock is DENIED, do NOT edit that file. Coordinate with the lock holder or work on a different file.
+6. If a lock succeeds WITH a territory warning, the file belongs to another peer's claimed area — coordinate with the owner before making significant changes there.
+7. When you complete a task, IMMEDIATELY update it to "done" (intandem_update_task), unlock any files you locked, and release ownership you no longer need.
+8. BEFORE implementing a shared interface, data schema, or cross-agent contract, propose a spec (intandem_propose_spec) and wait for all peers to approve it. Do NOT implement until the spec reaches "approved" status.
+9. When you receive a spec proposal notification, review it promptly with intandem_review_spec.
+10. When you discover something relevant to a peer's task, send a directed finding (intandem_send with "to").
+11. When your work produces output another peer needs, send a handoff (intandem_send type: "handoff" with "to").
+12. Periodically check the board (intandem_board), locks (intandem_locks), and territory map (intandem_ownership) to stay aware of progress.
 
 ### Message routing:
 - ALWAYS check the board before sending findings, questions, or handoffs to know who owns what.
@@ -80,6 +82,7 @@ Sharing: intandem_share (share a file/snippet with peers — includes actual cod
 Findings: intandem_finding (report structured finding), intandem_findings (query/filter findings)
 Context: intandem_set_var / intandem_get_var (shared workspace variables for config, IDs, etc.)
 Locking: intandem_lock (lock a file before editing), intandem_unlock (release when done), intandem_locks (view all locks)
+Territory: intandem_claim_ownership (claim files/subtrees you own), intandem_release_ownership (release claims), intandem_ownership (view the territory map)
 Specs: intandem_propose_spec (propose interface/schema/boundary/contract), intandem_review_spec (vote), intandem_update_spec (revise after feedback), intandem_specs (list), intandem_get_spec (details), intandem_withdraw_spec (withdraw)
 Info: intandem_peers, intandem_leave
 
@@ -109,6 +112,8 @@ export async function startChannelServer(): Promise<void> {
     pendingActivityResolve: null,
     pendingFindingsResolve: null,
     pendingLockResolve: null,
+    pendingOwnResultResolve: null,
+    pendingOwnListResolve: null,
     pendingSpecsResolve: null,
     pendingSpecDetailResolve: null,
     pendingSpecResultResolve: null,
@@ -441,7 +446,10 @@ export async function startChannelServer(): Promise<void> {
         if (state.pendingLockResolve) {
           if (msg.success) {
             const expiryStr = msg.expiresAt ? ` (expires in ${Math.round((msg.expiresAt - Date.now()) / 1000)}s)` : '';
-            state.pendingLockResolve(`Locked "${msg.filePath}"${expiryStr}`);
+            const tw = msg.territoryWarning
+              ? `\nWARNING: this file is in ${msg.territoryWarning.owner}'s territory (${sanitizeContent(msg.territoryWarning.pattern)}) — coordinate with them before making significant changes.`
+              : '';
+            state.pendingLockResolve(`Locked "${msg.filePath}"${expiryStr}${tw}`);
           } else {
             const holder = msg.lockedBy ? ` by ${msg.lockedBy}` : '';
             state.pendingLockResolve(
@@ -479,6 +487,54 @@ export async function startChannelServer(): Promise<void> {
           }
           state.pendingLockResolve = null;
         }
+        break;
+
+      case 'own_result':
+        if (state.pendingOwnResultResolve) {
+          if (msg.success) {
+            state.pendingOwnResultResolve('Done.');
+          } else {
+            const conflictLines = msg.conflicts?.length
+              ? `\nConflicting claims:\n${msg.conflicts
+                  .map(
+                    (c) =>
+                      `  ${sanitizeContent(c.pattern)} — owned by ${c.owner}${c.note ? ` (${sanitizeContent(c.note)})` : ''}`,
+                  )
+                  .join(
+                    '\n',
+                  )}\nNegotiate the boundary with a boundary spec (intandem_propose_spec) or pick a narrower pattern.`
+              : '';
+            state.pendingOwnResultResolve(`OWNERSHIP REJECTED: ${msg.reason ?? 'unknown reason'}${conflictLines}`);
+          }
+          state.pendingOwnResultResolve = null;
+        }
+        break;
+
+      case 'own_list':
+        if (state.pendingOwnListResolve) {
+          state.pendingOwnListResolve(msg.claims);
+          state.pendingOwnListResolve = null;
+        }
+        break;
+
+      case 'own_update':
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `TERRITORY ${msg.event === 'claimed' ? 'CLAIMED' : 'RELEASED'}: "${sanitizeContent(msg.claim.pattern)}" by ${msg.claim.owner}${msg.claim.note ? ` — ${sanitizeContent(msg.claim.note)}` : ''}${msg.event === 'claimed' ? '. Avoid editing files in this area without coordinating.' : '. This area is now unclaimed.'}`,
+            meta: { type: 'status', event: `ownership_${msg.event}`, peer: msg.claim.owner },
+          },
+        });
+        break;
+
+      case 'territory_notice':
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: `TERRITORY: ${msg.lockedBy} locked "${sanitizeContent(msg.filePath)}" inside your territory (${sanitizeContent(msg.pattern)})${msg.taskId ? ` for task ${msg.taskId}` : ''} — check in with them if this overlaps your work.`,
+            meta: { type: 'status', event: 'territory_lock', peer: msg.lockedBy },
+          },
+        });
         break;
 
       case 'spec_broadcast': {

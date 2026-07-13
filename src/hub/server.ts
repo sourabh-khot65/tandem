@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
 import { getDashboardHtml } from './dashboard.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
+import { normalizePath, canonicalizePattern, findConflicts, findOwner } from '../shared/paths.js';
 import type {
   HubMessage,
   PeerInfo,
@@ -11,6 +12,7 @@ import type {
   TaskItem,
   MessageType,
   FileLock,
+  OwnershipClaim,
   Spec,
   SpecStatus,
   SpecVote,
@@ -75,6 +77,7 @@ const MAX_SPEC_NAME_LENGTH = 200;
 const MAX_SPEC_CONTENT_LENGTH = 10_000;
 const MAX_SPEC_COMMENT_LENGTH = 2000;
 const MAX_SPECS_PER_WORKSPACE = 100;
+const MAX_CLAIMS_PER_PEER = 20;
 
 export class TandemHub {
   private httpServer: HttpServer | null = null;
@@ -362,6 +365,15 @@ export class TandemHub {
           break;
         case 'spec_get':
           this.handleSpecGet(ws, workspace, msg.specId);
+          break;
+        case 'own_claim':
+          this.handleOwnClaim(ws, workspace, peerUsername, msg.patterns, msg.note);
+          break;
+        case 'own_release':
+          this.handleOwnRelease(ws, workspace, peerUsername, msg.patterns);
+          break;
+        case 'own_request':
+          this.handleOwnRequest(ws, workspace);
           break;
         // invite_resolve handled pre-auth above
       }
@@ -878,11 +890,34 @@ export class TandemHub {
       const result = workspace.db.acquireLock(filePath, from, DEFAULT_LOCK_TTL_MS, taskId);
       if (result.success) {
         this.broadcastActivity(workspace, from, 'lock_acquired', filePath);
+        // Territory check: warn (but grant) when the path is inside another
+        // peer's claimed territory, and notify the owner if they're online.
+        // Ownership matching uses a normalized copy; lock storage stays byte-exact.
+        let territoryWarning: { owner: string; pattern: string } | undefined;
+        const normalized = normalizePath(filePath);
+        if (normalized) {
+          const claim = findOwner(normalized, workspace.db.getOwnership());
+          if (claim && claim.owner !== from) {
+            territoryWarning = { owner: claim.owner, pattern: claim.pattern };
+            this.broadcastActivity(workspace, from, 'lock_in_territory', `${filePath} (territory of ${claim.owner})`);
+            const owner = workspace.peers.get(claim.owner);
+            if (owner) {
+              this.send(owner.ws, {
+                kind: 'territory_notice',
+                filePath,
+                lockedBy: from,
+                pattern: claim.pattern,
+                taskId,
+              });
+            }
+          }
+        }
         this.send(ws, {
           kind: 'lock_result',
           filePath,
           success: true,
           expiresAt: result.lock.expiresAt,
+          territoryWarning,
         });
         this.broadcastToWorkspace(workspace, { kind: 'lock_update', lock: result.lock, event: 'acquired' }, from);
       } else {
@@ -926,6 +961,105 @@ export class TandemHub {
     try {
       const locks = workspace.db.getActiveLocks();
       this.send(ws, { kind: 'locks_list', locks });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  // ── Ownership registry ─────────────────────────────────────────────
+
+  private handleOwnClaim(ws: WebSocket, workspace: Workspace, from: string, patterns: string[], note?: string): void {
+    try {
+      if (!Array.isArray(patterns) || patterns.length === 0) {
+        this.send(ws, { kind: 'own_result', success: false, reason: 'Provide at least one pattern to claim' });
+        return;
+      }
+      const canonical: string[] = [];
+      for (const raw of patterns) {
+        if (typeof raw !== 'string' || raw.length > MAX_FILE_PATH_LENGTH) {
+          this.send(ws, {
+            kind: 'own_result',
+            success: false,
+            reason: `Invalid pattern (max ${MAX_FILE_PATH_LENGTH} chars)`,
+          });
+          return;
+        }
+        const c = canonicalizePattern(raw);
+        if (c === null) {
+          this.send(ws, {
+            kind: 'own_result',
+            success: false,
+            reason: `Invalid pattern "${raw}": must be a relative path or subtree (no absolute paths, "..", or whole-repo claims)`,
+          });
+          return;
+        }
+        canonical.push(c);
+      }
+      const existing = workspace.db.getOwnership();
+      const mine = existing.filter((c) => c.owner === from);
+      const newPatterns = canonical.filter((c) => !mine.some((m) => m.pattern === c));
+      if (mine.length + newPatterns.length > MAX_CLAIMS_PER_PEER) {
+        this.send(ws, {
+          kind: 'own_result',
+          success: false,
+          reason: `Claim limit reached (max ${MAX_CLAIMS_PER_PEER} per peer)`,
+        });
+        return;
+      }
+      // Reject overlaps with any existing claim (including your own, except an
+      // identical re-claim which upserts) and within the submitted batch —
+      // this keeps "every path matches at most one claim" true.
+      const conflicts: OwnershipClaim[] = [];
+      for (let i = 0; i < canonical.length; i++) {
+        const others = existing.filter((c) => !(c.owner === from && c.pattern === canonical[i]));
+        conflicts.push(...findConflicts(canonical[i], others));
+        for (let j = i + 1; j < canonical.length; j++) {
+          if (canonical[i] === canonical[j]) continue;
+          conflicts.push(...findConflicts(canonical[i], [{ pattern: canonical[j], owner: from, createdAt: 0 }]));
+        }
+      }
+      if (conflicts.length > 0) {
+        this.send(ws, { kind: 'own_result', success: false, reason: 'Pattern overlaps an existing claim', conflicts });
+        return;
+      }
+      for (const pattern of canonical) {
+        const claim = workspace.db.claimOwnership(pattern, from, note);
+        this.broadcastActivity(workspace, from, 'ownership_claimed', pattern);
+        this.broadcastToWorkspace(workspace, { kind: 'own_update', claim, event: 'claimed' }, from);
+      }
+      this.send(ws, { kind: 'own_result', success: true });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleOwnRelease(ws: WebSocket, workspace: Workspace, from: string, patterns?: string[]): void {
+    try {
+      const canonical =
+        patterns === undefined
+          ? null
+          : patterns.map((p) => canonicalizePattern(p)).filter((p): p is string => p !== null);
+      const released = workspace.db.releaseOwnership(canonical, from);
+      if (released.length === 0) {
+        this.send(ws, { kind: 'own_result', success: false, reason: 'No matching claims held by you' });
+        return;
+      }
+      for (const claim of released) {
+        this.broadcastActivity(workspace, from, 'ownership_released', claim.pattern);
+        this.broadcastToWorkspace(workspace, { kind: 'own_update', claim, event: 'released' }, from);
+      }
+      this.send(ws, { kind: 'own_result', success: true });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleOwnRequest(ws: WebSocket, workspace: Workspace): void {
+    try {
+      this.send(ws, { kind: 'own_list', claims: workspace.db.getOwnership() });
     } catch (err: unknown) {
       if (err instanceof TypeError && String(err).includes('not open')) return;
       throw err;
@@ -1216,6 +1350,7 @@ export class TandemHub {
         peers,
         tasks: workspace.db.getAllTasks(),
         locks: workspace.db.getActiveLocks(),
+        claims: workspace.db.getOwnership(),
         findings: workspace.db.getFindings(),
         specs: workspace.db.getSpecs(),
         vars: workspace.db.getAllVars(),

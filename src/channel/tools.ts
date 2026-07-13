@@ -316,6 +316,44 @@ export const TOOL_DEFINITIONS = [
     inputSchema: { type: 'object' as const, properties: {} },
   },
   {
+    name: 'intandem_claim_ownership',
+    description:
+      'Claim territory over files or directory subtrees you are working on (e.g. "src/cart/**" or "src/shared/money.ts"). Other peers get a warning when they lock files inside your territory. Claims persist until released. Overlapping claims are rejected — negotiate contested boundaries with a boundary spec (intandem_propose_spec) first.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        patterns: {
+          type: 'array' as const,
+          items: { type: 'string' as const },
+          description: 'Exact file paths or directory subtrees ("src/cart/**"), relative to project root',
+        },
+        note: { type: 'string' as const, description: 'Optional note (e.g. the task or module this covers)' },
+      },
+      required: ['patterns'],
+    },
+  },
+  {
+    name: 'intandem_release_ownership',
+    description:
+      'Release ownership claims you hold. Pass specific patterns, or omit to release all your claims. Do this when you finish work on a module.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        patterns: {
+          type: 'array' as const,
+          items: { type: 'string' as const },
+          description: 'Patterns to release (omit to release all your claims)',
+        },
+      },
+    },
+  },
+  {
+    name: 'intandem_ownership',
+    description:
+      'View the workspace territory map: which peer owns which files and directories, with notes. Check this before starting work on a new area.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
+  {
     name: 'intandem_propose_spec',
     description:
       'Propose a spec (interface, schema, boundary, or contract) for peer review. Use BEFORE implementing any shared interface or contract. All connected peers must approve before implementation begins.',

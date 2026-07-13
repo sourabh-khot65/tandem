@@ -7,6 +7,7 @@ import type {
   Finding,
   FindingSeverity,
   FileLock,
+  OwnershipClaim,
   Spec,
   SpecReview,
   SpecStatus,
@@ -173,6 +174,13 @@ export class TandemDB {
         locked_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         task_id TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS ownership (
+        pattern TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        note TEXT,
+        created_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS specs (
@@ -561,6 +569,63 @@ export class TandemDB {
       expiresAt: r.expires_at,
       taskId: r.task_id ?? undefined,
     }));
+  }
+
+  // ── Ownership registry ─────────────────────────────────────────────
+
+  claimOwnership(pattern: string, owner: string, note?: string): OwnershipClaim {
+    const existing = this.db.prepare('SELECT * FROM ownership WHERE pattern = ?').get(pattern) as
+      | { pattern: string; owner: string; note: string | null; created_at: number }
+      | undefined;
+    if (existing && existing.owner === owner) {
+      // Re-claiming your own pattern upserts the note; createdAt is preserved.
+      this.db.prepare('UPDATE ownership SET note = ? WHERE pattern = ?').run(note ?? existing.note, pattern);
+      return { pattern, owner, note: note ?? existing.note ?? undefined, createdAt: existing.created_at };
+    }
+    const createdAt = Date.now();
+    this.db
+      .prepare('INSERT INTO ownership (pattern, owner, note, created_at) VALUES (?, ?, ?, ?)')
+      .run(pattern, owner, note ?? null, createdAt);
+    return { pattern, owner, note, createdAt };
+  }
+
+  releaseOwnership(patterns: string[] | null, owner: string): OwnershipClaim[] {
+    const rows = (
+      patterns === null
+        ? this.db.prepare('SELECT * FROM ownership WHERE owner = ?').all(owner)
+        : patterns.flatMap((p) =>
+            this.db.prepare('SELECT * FROM ownership WHERE pattern = ? AND owner = ?').all(p, owner),
+          )
+    ) as Array<{ pattern: string; owner: string; note: string | null; created_at: number }>;
+    for (const r of rows) {
+      this.db.prepare('DELETE FROM ownership WHERE pattern = ?').run(r.pattern);
+    }
+    return rows.map((r) => ({
+      pattern: r.pattern,
+      owner: r.owner,
+      note: r.note ?? undefined,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getOwnership(): OwnershipClaim[] {
+    const rows = this.db.prepare('SELECT * FROM ownership ORDER BY created_at').all() as Array<{
+      pattern: string;
+      owner: string;
+      note: string | null;
+      created_at: number;
+    }>;
+    return rows.map((r) => ({
+      pattern: r.pattern,
+      owner: r.owner,
+      note: r.note ?? undefined,
+      createdAt: r.created_at,
+    }));
+  }
+
+  ownershipCountFor(owner: string): number {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM ownership WHERE owner = ?').get(owner) as { n: number };
+    return row.n;
   }
 
   // ── Specs ──────────────────────────────────────────────────────────

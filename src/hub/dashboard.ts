@@ -419,7 +419,7 @@ button,input{font-family:inherit}
 
 <script>
 (function(){
-  let state={workspace:null,peers:[],tasks:[],locks:[],findings:[],specs:[],vars:[],activity:[],messages:[]};
+  let state={workspace:null,peers:[],tasks:[],locks:[],claims:[],findings:[],specs:[],vars:[],activity:[],messages:[]};
   let ws=null,reconnectDelay=1000,reconnectTimer=null,lostTimer=null,startedAt=Date.now();
   let expandedSpecs={},expandedTasks={},expandedFindings={},actFilter='',peerFocus=null;
 
@@ -535,6 +535,7 @@ button,input{font-family:inherit}
       workspace:state.workspace,peers:state.peers,
       tasks:state.tasks.filter(t=>t.assignee===f||t.createdBy===f),
       locks:state.locks.filter(l=>l.lockedBy===f),
+      claims:state.claims.filter(c=>c.owner===f),
       findings:state.findings.filter(x=>x.reportedBy===f),
       specs:state.specs.filter(s=>s.proposedBy===f||(s.reviews||[]).some(r=>r.reviewer===f)),
       vars:state.vars.filter(x=>x.setBy===f),
@@ -698,22 +699,40 @@ button,input{font-family:inherit}
 
   // Render: Locks
   function renderLocks(){
-    const locks=V().locks;
-    if(!locks.length){
-      $('locksW').innerHTML=peerFocus&&state.locks.length?emptyFor('no locks held by them')
-        :emptyHtml('no active file locks','peers take advisory locks before editing shared files \\u00B7 5 minute ttl');
+    const v=V();
+    const locks=v.locks,claims=v.claims;
+    if(!locks.length&&!claims.length){
+      $('locksW').innerHTML=peerFocus&&(state.locks.length||state.claims.length)?emptyFor('no locks or territory held by them')
+        :emptyHtml('no locks or territory','peers take advisory locks before editing (5 minute ttl) and claim subtree ownership with <code>intandem_claim_ownership</code>');
       return;
     }
-    let h='<table class="dt"><thead><tr><th>file</th><th>held by</th><th>task</th><th>ttl</th></tr></thead><tbody>';
-    for(const l of locks){
-      const rem=Math.max(0,l.expiresAt-Date.now());
-      const total=Math.max(1,l.expiresAt-l.lockedAt);
-      const low=rem<60000;
-      h+='<tr><td>'+esc(l.filePath)+'</td><td>'+who(l.lockedBy)+'</td>'+
-        '<td class="dim">'+(l.taskId?esc(l.taskId):'\\u2014')+'</td>'+
-        '<td><span class="gauge '+(low?'exp':'ok-g')+'">'+gauge(rem/total)+'</span> <span class="lock-ttl'+(low?' exp':' dim')+'">'+dur(rem)+'</span></td></tr>';
+    let h='';
+    if(claims.length){
+      h+='<div class="sh">territory <span class="rule"></span> <span class="shv">'+claims.length+'</span></div>';
+      h+='<table class="dt"><thead><tr><th>pattern</th><th>owner</th><th>note</th><th>since</th></tr></thead><tbody>';
+      for(const c of claims){
+        h+='<tr><td>'+esc(c.pattern)+'</td><td>'+who(c.owner)+'</td>'+
+          '<td class="dim">'+(c.note?esc(c.note):'\\u2014')+'</td>'+
+          '<td class="dim">'+dur(Date.now()-c.createdAt)+' ago</td></tr>';
+      }
+      h+='</tbody></table><div style="height:20px"></div>';
     }
-    $('locksW').innerHTML=h+'</tbody></table>';
+    h+='<div class="sh">active locks <span class="rule"></span> <span class="shv">'+locks.length+'</span></div>';
+    if(!locks.length){
+      h+='<div class="k-empty">\\u2205 no active locks</div>';
+    }else{
+      h+='<table class="dt"><thead><tr><th>file</th><th>held by</th><th>task</th><th>ttl</th></tr></thead><tbody>';
+      for(const l of locks){
+        const rem=Math.max(0,l.expiresAt-Date.now());
+        const total=Math.max(1,l.expiresAt-l.lockedAt);
+        const low=rem<60000;
+        h+='<tr><td>'+esc(l.filePath)+'</td><td>'+who(l.lockedBy)+'</td>'+
+          '<td class="dim">'+(l.taskId?esc(l.taskId):'\\u2014')+'</td>'+
+          '<td><span class="gauge '+(low?'exp':'ok-g')+'">'+gauge(rem/total)+'</span> <span class="lock-ttl'+(low?' exp':' dim')+'">'+dur(rem)+'</span></td></tr>';
+      }
+      h+='</tbody></table>';
+    }
+    $('locksW').innerHTML=h;
   }
 
   // Render: Findings
@@ -887,6 +906,7 @@ button,input{font-family:inherit}
         state.workspace=msg.workspace;state.peers=msg.peers;state.tasks=msg.tasks;
         state.locks=msg.locks;state.findings=msg.findings;state.vars=msg.vars;
         state.activity=msg.activity;state.messages=msg.messages;state.specs=msg.specs||[];
+        state.claims=msg.claims||[];
         $('wsName').textContent=msg.workspace.name;
         renderAll();sbar('synced with hub');
         break;
@@ -913,6 +933,11 @@ button,input{font-family:inherit}
         if(msg.event==='acquired'){state.locks=state.locks.filter(l=>l.filePath!==msg.lock.filePath);state.locks.push(msg.lock)}
         else state.locks=state.locks.filter(l=>l.filePath!==msg.lock.filePath);
         renderLocks();renderStats();break;
+      case 'own_update':
+        if(msg.event==='claimed'){state.claims=state.claims.filter(c=>c.pattern!==msg.claim.pattern);state.claims.push(msg.claim)}
+        else state.claims=state.claims.filter(c=>c.pattern!==msg.claim.pattern);
+        renderLocks();renderStats();
+        toast('territory '+msg.event+': '+msg.claim.pattern.slice(0,40));break;
       case 'finding_broadcast':
         state.findings.push(msg.finding);renderFindings();renderStats();
         toast('finding: '+msg.finding.summary.slice(0,40),'warn');break;
@@ -992,6 +1017,8 @@ button,input{font-family:inherit}
       sel:'[data-sid="'+sp.id+'"]',ex:()=>{expandedSpecs[sp.id]=true;renderSpecs()}}));
     state.locks.forEach(l=>it.push({g:'locks',tab:'locks',ic:'\\u2298',p:l.filePath,s:l.lockedBy,
       hay:(l.filePath+' '+l.lockedBy+' '+(l.taskId||'')).toLowerCase()}));
+    state.claims.forEach(c=>it.push({g:'territory',tab:'locks',ic:'\\u258C',p:c.pattern,s:c.owner,
+      hay:(c.pattern+' '+c.owner+' '+(c.note||'')).toLowerCase()}));
     state.vars.forEach(v=>it.push({g:'vars',tab:'vars',ic:'$',p:v.key,s:String(v.value).slice(0,40),
       hay:(v.key+' '+v.value+' '+v.setBy).toLowerCase()}));
     state.messages.forEach(m=>it.push({g:'messages',tab:'messages',ic:'\\u2709',p:m.content.slice(0,80),s:m.from+(m.to?' \\u2192 '+m.to:''),

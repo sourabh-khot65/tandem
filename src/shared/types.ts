@@ -51,10 +51,25 @@ export type HubMessage =
   | { kind: 'findings_list'; findings: Finding[] }
   | { kind: 'lock_acquire'; filePath: string; taskId?: string }
   | { kind: 'lock_release'; filePath: string }
-  | { kind: 'lock_result'; filePath: string; success: boolean; lockedBy?: string; expiresAt?: number; reason?: string }
+  | {
+      kind: 'lock_result';
+      filePath: string;
+      success: boolean;
+      lockedBy?: string;
+      expiresAt?: number;
+      reason?: string;
+      territoryWarning?: { owner: string; pattern: string };
+    }
   | { kind: 'lock_update'; lock: FileLock; event: 'acquired' | 'released' | 'expired' }
   | { kind: 'locks_request' }
   | { kind: 'locks_list'; locks: FileLock[] }
+  | { kind: 'own_claim'; patterns: string[]; note?: string }
+  | { kind: 'own_release'; patterns?: string[] }
+  | { kind: 'own_request' }
+  | { kind: 'own_list'; claims: OwnershipClaim[] }
+  | { kind: 'own_result'; success: boolean; reason?: string; conflicts?: OwnershipClaim[] }
+  | { kind: 'own_update'; claim: OwnershipClaim; event: 'claimed' | 'released' }
+  | { kind: 'territory_notice'; filePath: string; lockedBy: string; pattern: string; taskId?: string }
   | { kind: 'spec_propose'; spec: Spec }
   | { kind: 'spec_review'; specId: string; vote: SpecVote; comment?: string }
   | { kind: 'spec_update'; specId: string; content: string; name?: string }
@@ -76,6 +91,7 @@ export type HubMessage =
       peers: PeerInfo[];
       tasks: TaskItem[];
       locks: FileLock[];
+      claims: OwnershipClaim[];
       findings: Finding[];
       specs: Spec[];
       vars: Array<{ key: string; value: string; setBy: string }>;
@@ -122,6 +138,15 @@ export interface FileLock {
   lockedAt: number;
   expiresAt: number;
   taskId?: string;
+}
+
+// Ownership registry: a claim over an exact path or a subtree prefix
+// (canonical prefixes end with '/'). Persists until explicitly released.
+export interface OwnershipClaim {
+  pattern: string;
+  owner: string;
+  note?: string;
+  createdAt: number;
 }
 
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';

@@ -18,6 +18,7 @@ import type {
   CodeReference,
   Finding,
   FindingSeverity,
+  OwnershipClaim,
   Spec,
   SpecStatus,
   SpecVote,
@@ -55,6 +56,8 @@ export interface ChannelState {
   pendingActivityResolve: ((result: string) => void) | null;
   pendingFindingsResolve: ((result: string) => void) | null;
   pendingLockResolve: ((result: string) => void) | null;
+  pendingOwnResultResolve: ((result: string) => void) | null;
+  pendingOwnListResolve: ((claims: OwnershipClaim[]) => void) | null;
   pendingSpecsResolve: ((specs: Spec[]) => void) | null;
   pendingSpecDetailResolve: ((spec: Spec | null) => void) | null;
   pendingSpecResultResolve: ((result: string) => void) | null;
@@ -174,6 +177,12 @@ export async function handleToolCall(
       return handleUnlock(args, conn, state);
     case 'intandem_locks':
       return handleLocks(conn, state);
+    case 'intandem_claim_ownership':
+      return handleClaimOwnership(args, conn, state);
+    case 'intandem_release_ownership':
+      return handleReleaseOwnership(args, conn, state);
+    case 'intandem_ownership':
+      return handleOwnership(conn, state);
     case 'intandem_propose_spec':
       return handleProposeSpec(args, conn, state);
     case 'intandem_review_spec':
@@ -736,6 +745,77 @@ async function handleLocks(conn: HubConnection, state: ChannelState): Promise<To
       if (state.pendingLockResolve) {
         state.pendingLockResolve = null;
         resolve(text('Timed out waiting for locks list.'));
+      }
+    }, 3000);
+  });
+}
+
+// ── Ownership registry handlers ─────────────────────────────────────
+
+async function handleClaimOwnership(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const patterns = args.patterns as string[] | undefined;
+  if (!patterns || !Array.isArray(patterns) || patterns.length === 0) {
+    return text('Specify at least one pattern to claim (exact path or subtree like "src/cart/**").');
+  }
+  const note = args.note as string | undefined;
+
+  return new Promise((resolve) => {
+    state.pendingOwnResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'own_claim', patterns, note });
+    setTimeout(() => {
+      if (state.pendingOwnResultResolve) {
+        state.pendingOwnResultResolve = null;
+        resolve(text('Timed out waiting for ownership response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleReleaseOwnership(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const patterns = args.patterns as string[] | undefined;
+
+  return new Promise((resolve) => {
+    state.pendingOwnResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'own_release', patterns });
+    setTimeout(() => {
+      if (state.pendingOwnResultResolve) {
+        state.pendingOwnResultResolve = null;
+        resolve(text('Timed out waiting for ownership response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleOwnership(conn: HubConnection, state: ChannelState): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+
+  return new Promise((resolve) => {
+    state.pendingOwnListResolve = (claims: OwnershipClaim[]) => {
+      if (claims.length === 0) {
+        resolve(text('No ownership claims. The territory map is empty.'));
+        return;
+      }
+      const lines = claims.map((c) => {
+        const note = c.note ? ` — ${sanitizeContent(c.note)}` : '';
+        return `  ${sanitizeContent(c.pattern)} — owned by ${c.owner}${note}`;
+      });
+      resolve(text(`Territory map:\n${lines.join('\n')}`));
+    };
+    conn.send({ kind: 'own_request' });
+    setTimeout(() => {
+      if (state.pendingOwnListResolve) {
+        state.pendingOwnListResolve = null;
+        resolve(text('Timed out waiting for ownership list.'));
       }
     }, 3000);
   });
