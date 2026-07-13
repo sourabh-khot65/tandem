@@ -4,7 +4,18 @@ import { randomBytes } from 'node:crypto';
 import { TandemDB } from './db.js';
 import { getDashboardHtml } from './dashboard.js';
 import { generateWorkspaceId, generateToken, createJoinCode } from '../shared/crypto.js';
-import type { HubMessage, PeerInfo, PeerMessage, TaskItem, MessageType, FileLock } from '../shared/types.js';
+import type {
+  HubMessage,
+  PeerInfo,
+  PeerMessage,
+  TaskItem,
+  MessageType,
+  FileLock,
+  Spec,
+  SpecStatus,
+  SpecVote,
+  SpecType,
+} from '../shared/types.js';
 
 const VALID_MESSAGE_TYPES: MessageType[] = [
   'finding',
@@ -58,6 +69,12 @@ const MAX_WS_PAYLOAD = 64 * 1024;
 const DEFAULT_LOCK_TTL_MS = 5 * 60 * 1000;
 const LOCK_CLEANUP_INTERVAL_MS = 60 * 1000;
 const MAX_FILE_PATH_LENGTH = 500;
+const VALID_SPEC_TYPES: SpecType[] = ['interface', 'schema', 'boundary', 'contract'];
+const VALID_SPEC_VOTES: SpecVote[] = ['approve', 'request_changes'];
+const MAX_SPEC_NAME_LENGTH = 200;
+const MAX_SPEC_CONTENT_LENGTH = 10_000;
+const MAX_SPEC_COMMENT_LENGTH = 2000;
+const MAX_SPECS_PER_WORKSPACE = 100;
 
 export class TandemHub {
   private httpServer: HttpServer | null = null;
@@ -327,6 +344,24 @@ export class TandemHub {
           break;
         case 'locks_request':
           this.handleLocksRequest(ws, workspace);
+          break;
+        case 'spec_propose':
+          this.handleSpecPropose(ws, workspace, peerUsername, msg.spec);
+          break;
+        case 'spec_review':
+          this.handleSpecReview(ws, workspace, peerUsername, msg.specId, msg.vote, msg.comment);
+          break;
+        case 'spec_update':
+          this.handleSpecUpdate(ws, workspace, peerUsername, msg.specId, msg.content, msg.name);
+          break;
+        case 'spec_withdraw':
+          this.handleSpecWithdraw(ws, workspace, peerUsername, msg.specId);
+          break;
+        case 'specs_request':
+          this.handleSpecsRequest(ws, workspace, msg.status);
+          break;
+        case 'spec_get':
+          this.handleSpecGet(ws, workspace, msg.specId);
           break;
         // invite_resolve handled pre-auth above
       }
@@ -897,6 +932,248 @@ export class TandemHub {
     }
   }
 
+  // ── Spec negotiation ───────────────────────────────────────────────
+
+  private handleSpecPropose(ws: WebSocket, workspace: Workspace, from: string, spec: Spec): void {
+    try {
+      if (!spec.name || spec.name.length > MAX_SPEC_NAME_LENGTH) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId: '',
+          success: false,
+          reason: `Spec name required (max ${MAX_SPEC_NAME_LENGTH} chars)`,
+        });
+        return;
+      }
+      if (!spec.content || spec.content.length > MAX_SPEC_CONTENT_LENGTH) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId: '',
+          success: false,
+          reason: `Spec content required (max ${MAX_SPEC_CONTENT_LENGTH} chars)`,
+        });
+        return;
+      }
+      if (!VALID_SPEC_TYPES.includes(spec.specType)) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId: '',
+          success: false,
+          reason: `Invalid spec type. Use: ${VALID_SPEC_TYPES.join(', ')}`,
+        });
+        return;
+      }
+      if (workspace.db.specCount() >= MAX_SPECS_PER_WORKSPACE) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId: '',
+          success: false,
+          reason: `Spec limit reached (max ${MAX_SPECS_PER_WORKSPACE} per workspace)`,
+        });
+        return;
+      }
+      spec.id = `S-${randomBytes(3).toString('hex')}`;
+      spec.proposedBy = from;
+      spec.status = 'proposed';
+      spec.version = 1;
+      spec.reviews = [];
+      spec.createdAt = Date.now();
+      spec.updatedAt = Date.now();
+      workspace.db.createSpec(spec);
+      this.broadcastActivity(workspace, from, 'spec_proposed', `[${spec.id}] ${spec.name} (${spec.specType})`);
+      this.send(ws, { kind: 'spec_result', specId: spec.id, success: true, spec });
+      this.broadcastToWorkspace(workspace, { kind: 'spec_broadcast', spec, event: 'proposed' }, from);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleSpecReview(
+    ws: WebSocket,
+    workspace: Workspace,
+    from: string,
+    specId: string,
+    vote: SpecVote,
+    comment?: string,
+  ): void {
+    try {
+      if (!VALID_SPEC_VOTES.includes(vote)) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId,
+          success: false,
+          reason: `Invalid vote. Use: ${VALID_SPEC_VOTES.join(', ')}`,
+        });
+        return;
+      }
+      if (comment && comment.length > MAX_SPEC_COMMENT_LENGTH) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId,
+          success: false,
+          reason: `Comment too long (max ${MAX_SPEC_COMMENT_LENGTH} chars)`,
+        });
+        return;
+      }
+      const spec = workspace.db.getSpec(specId);
+      if (!spec) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Spec not found' });
+        return;
+      }
+      if (spec.status === 'withdrawn') {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Spec has been withdrawn' });
+        return;
+      }
+      if (spec.status === 'approved') {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Spec is already approved' });
+        return;
+      }
+      if (spec.proposedBy === from) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Cannot review your own spec' });
+        return;
+      }
+      workspace.db.addSpecReview(specId, { reviewer: from, vote, comment, version: spec.version });
+      const updated = workspace.db.getSpec(specId)!;
+      this.broadcastActivity(
+        workspace,
+        from,
+        'spec_reviewed',
+        `[${specId}] ${vote}${comment ? ': ' + comment.slice(0, 60) : ''}`,
+      );
+      this.send(ws, { kind: 'spec_result', specId, success: true, spec: updated });
+      this.broadcastToWorkspace(
+        workspace,
+        {
+          kind: 'spec_broadcast',
+          spec: updated,
+          event: 'reviewed',
+          reviewedBy: from,
+        },
+        from,
+      );
+      this.checkSpecConsensus(workspace, updated);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private checkSpecConsensus(workspace: Workspace, spec: Spec): void {
+    if (spec.status !== 'proposed') return;
+    const nonProposerPeers = Array.from(workspace.peers.keys()).filter((p) => p !== spec.proposedBy);
+    if (nonProposerPeers.length === 0) return;
+    const approvals = new Set(spec.reviews.filter((r) => r.vote === 'approve').map((r) => r.reviewer));
+    const allApproved = nonProposerPeers.every((p) => approvals.has(p));
+    if (allApproved) {
+      workspace.db.updateSpecStatus(spec.id, 'approved');
+      const approved = workspace.db.getSpec(spec.id)!;
+      this.broadcastActivity(workspace, 'system', 'spec_approved', `[${spec.id}] ${spec.name} — consensus reached`);
+      this.broadcastToWorkspace(workspace, { kind: 'spec_broadcast', spec: approved, event: 'approved' });
+    }
+  }
+
+  private handleSpecUpdate(
+    ws: WebSocket,
+    workspace: Workspace,
+    from: string,
+    specId: string,
+    content: string,
+    name?: string,
+  ): void {
+    try {
+      if (!content || content.length > MAX_SPEC_CONTENT_LENGTH) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId,
+          success: false,
+          reason: `Content required (max ${MAX_SPEC_CONTENT_LENGTH} chars)`,
+        });
+        return;
+      }
+      if (name && name.length > MAX_SPEC_NAME_LENGTH) {
+        this.send(ws, {
+          kind: 'spec_result',
+          specId,
+          success: false,
+          reason: `Name too long (max ${MAX_SPEC_NAME_LENGTH} chars)`,
+        });
+        return;
+      }
+      const spec = workspace.db.getSpec(specId);
+      if (!spec) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Spec not found' });
+        return;
+      }
+      if (spec.proposedBy !== from) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Only the author can update a spec' });
+        return;
+      }
+      if (spec.status !== 'proposed') {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Can only update proposed specs' });
+        return;
+      }
+      const updated = workspace.db.updateSpec(specId, { content, ...(name ? { name } : {}) });
+      if (!updated) return;
+      this.broadcastActivity(workspace, from, 'spec_updated', `[${specId}] v${updated.version}`);
+      this.send(ws, { kind: 'spec_result', specId, success: true, spec: updated });
+      this.broadcastToWorkspace(workspace, { kind: 'spec_broadcast', spec: updated, event: 'updated' }, from);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleSpecWithdraw(ws: WebSocket, workspace: Workspace, from: string, specId: string): void {
+    try {
+      const spec = workspace.db.getSpec(specId);
+      if (!spec) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Spec not found' });
+        return;
+      }
+      if (spec.proposedBy !== from) {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Only the author can withdraw a spec' });
+        return;
+      }
+      if (spec.status === 'approved') {
+        this.send(ws, { kind: 'spec_result', specId, success: false, reason: 'Cannot withdraw an approved spec' });
+        return;
+      }
+      if (spec.status === 'withdrawn') {
+        this.send(ws, { kind: 'spec_result', specId, success: true, spec });
+        return;
+      }
+      workspace.db.updateSpecStatus(specId, 'withdrawn');
+      const withdrawn = workspace.db.getSpec(specId)!;
+      this.broadcastActivity(workspace, from, 'spec_withdrawn', `[${specId}] ${spec.name}`);
+      this.send(ws, { kind: 'spec_result', specId, success: true, spec: withdrawn });
+      this.broadcastToWorkspace(workspace, { kind: 'spec_broadcast', spec: withdrawn, event: 'withdrawn' }, from);
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleSpecsRequest(ws: WebSocket, workspace: Workspace, status?: SpecStatus): void {
+    try {
+      const specs = workspace.db.getSpecs(status ? { status } : undefined);
+      this.send(ws, { kind: 'specs_list', specs });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
+  private handleSpecGet(ws: WebSocket, workspace: Workspace, specId: string): void {
+    try {
+      const spec = workspace.db.getSpec(specId) ?? null;
+      this.send(ws, { kind: 'spec_detail', spec });
+    } catch (err: unknown) {
+      if (err instanceof TypeError && String(err).includes('not open')) return;
+      throw err;
+    }
+  }
+
   private cleanupExpiredLocks(): void {
     for (const workspace of this.workspaces.values()) {
       try {
@@ -940,6 +1217,7 @@ export class TandemHub {
         tasks: workspace.db.getAllTasks(),
         locks: workspace.db.getActiveLocks(),
         findings: workspace.db.getFindings(),
+        specs: workspace.db.getSpecs(),
         vars: workspace.db.getAllVars(),
         activity: workspace.db.getActivityLog(50),
         messages: workspace.db.getRecentMessages(20),

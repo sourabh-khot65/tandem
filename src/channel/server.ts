@@ -58,9 +58,11 @@ Your username is "${state.myUsername}".
 3. AFTER finishing edits to a file, call intandem_unlock to release it for other peers.
 4. If intandem_lock is DENIED, do NOT edit that file. Coordinate with the lock holder or work on a different file.
 5. When you complete a task, IMMEDIATELY update it to "done" (intandem_update_task) and unlock any files you locked.
-6. When you discover something relevant to a peer's task, send a directed finding (intandem_send with "to").
-7. When your work produces output another peer needs, send a handoff (intandem_send type: "handoff" with "to").
-8. Periodically check the board (intandem_board) and locks (intandem_locks) to stay aware of progress.
+6. BEFORE implementing a shared interface, data schema, or cross-agent contract, propose a spec (intandem_propose_spec) and wait for all peers to approve it. Do NOT implement until the spec reaches "approved" status.
+7. When you receive a spec proposal notification, review it promptly with intandem_review_spec.
+8. When you discover something relevant to a peer's task, send a directed finding (intandem_send with "to").
+9. When your work produces output another peer needs, send a handoff (intandem_send type: "handoff" with "to").
+10. Periodically check the board (intandem_board) and locks (intandem_locks) to stay aware of progress.
 
 ### Message routing:
 - ALWAYS check the board before sending findings, questions, or handoffs to know who owns what.
@@ -78,6 +80,7 @@ Sharing: intandem_share (share a file/snippet with peers — includes actual cod
 Findings: intandem_finding (report structured finding), intandem_findings (query/filter findings)
 Context: intandem_set_var / intandem_get_var (shared workspace variables for config, IDs, etc.)
 Locking: intandem_lock (lock a file before editing), intandem_unlock (release when done), intandem_locks (view all locks)
+Specs: intandem_propose_spec (propose interface/schema/boundary/contract), intandem_review_spec (vote), intandem_update_spec (revise after feedback), intandem_specs (list), intandem_get_spec (details), intandem_withdraw_spec (withdraw)
 Info: intandem_peers, intandem_leave
 
 All messages are end-to-end encrypted (AES-256-GCM) and signed (HMAC-SHA256).
@@ -106,6 +109,9 @@ export async function startChannelServer(): Promise<void> {
     pendingActivityResolve: null,
     pendingFindingsResolve: null,
     pendingLockResolve: null,
+    pendingSpecsResolve: null,
+    pendingSpecDetailResolve: null,
+    pendingSpecResultResolve: null,
     stats: {
       connectedAt: 0,
       toolCallCount: 0,
@@ -472,6 +478,73 @@ export async function startChannelServer(): Promise<void> {
             state.pendingLockResolve(`Active file locks:\n${lines.join('\n')}`);
           }
           state.pendingLockResolve = null;
+        }
+        break;
+
+      case 'spec_broadcast': {
+        const s = msg.spec;
+        const eventLabels: Record<string, string> = {
+          proposed: 'NEW SPEC PROPOSED',
+          updated: 'SPEC UPDATED',
+          approved: 'SPEC APPROVED',
+          withdrawn: 'SPEC WITHDRAWN',
+          reviewed: 'SPEC REVIEWED',
+        };
+        const reviewSummary = s.reviews.length > 0 ? s.reviews.map((r) => `${r.reviewer}: ${r.vote}`).join(', ') : '';
+        const lines = [
+          `${eventLabels[msg.event] ?? msg.event}: [${sanitizeContent(s.id)}] "${sanitizeContent(s.name)}" (${s.specType}) — v${s.version} by ${s.proposedBy}`,
+        ];
+        if (msg.reviewedBy) lines.push(`Reviewed by: ${msg.reviewedBy}`);
+        if (reviewSummary) lines.push(`Reviews: ${reviewSummary}`);
+        if (msg.event === 'proposed' || msg.event === 'updated') {
+          lines.push(`\nContent:\n${sanitizeContent(s.content)}`);
+        }
+        if (s.status === 'approved') {
+          lines.push('\nThis spec is now APPROVED — you may implement it.');
+        }
+        mcp.notification({
+          method: 'notifications/claude/channel',
+          params: {
+            content: lines.join('\n'),
+            meta: { type: 'review', event: `spec_${msg.event}`, specId: s.id },
+          },
+        });
+        break;
+      }
+
+      case 'spec_result':
+        if (state.pendingSpecResultResolve) {
+          if (msg.success) {
+            const s = msg.spec;
+            if (s) {
+              const reviewLines = s.reviews.map(
+                (r) => `  ${r.reviewer}: ${r.vote}${r.comment ? ' — ' + sanitizeContent(r.comment) : ''}`,
+              );
+              state.pendingSpecResultResolve(
+                `[${sanitizeContent(s.id)}] "${sanitizeContent(s.name)}" (${s.specType}) — ${s.status} v${s.version}` +
+                  (reviewLines.length > 0 ? `\nReviews:\n${reviewLines.join('\n')}` : ''),
+              );
+            } else {
+              state.pendingSpecResultResolve(`Spec ${msg.specId} updated.`);
+            }
+          } else {
+            state.pendingSpecResultResolve(`Failed: ${msg.reason ?? 'Unknown error'}`);
+          }
+          state.pendingSpecResultResolve = null;
+        }
+        break;
+
+      case 'specs_list':
+        if (state.pendingSpecsResolve) {
+          state.pendingSpecsResolve(msg.specs);
+          state.pendingSpecsResolve = null;
+        }
+        break;
+
+      case 'spec_detail':
+        if (state.pendingSpecDetailResolve) {
+          state.pendingSpecDetailResolve(msg.spec);
+          state.pendingSpecDetailResolve = null;
         }
         break;
 

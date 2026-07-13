@@ -55,6 +55,21 @@ export type HubMessage =
   | { kind: 'lock_update'; lock: FileLock; event: 'acquired' | 'released' | 'expired' }
   | { kind: 'locks_request' }
   | { kind: 'locks_list'; locks: FileLock[] }
+  | { kind: 'spec_propose'; spec: Spec }
+  | { kind: 'spec_review'; specId: string; vote: SpecVote; comment?: string }
+  | { kind: 'spec_update'; specId: string; content: string; name?: string }
+  | { kind: 'spec_withdraw'; specId: string }
+  | {
+      kind: 'spec_broadcast';
+      spec: Spec;
+      event: 'proposed' | 'updated' | 'approved' | 'withdrawn' | 'reviewed';
+      reviewedBy?: string;
+    }
+  | { kind: 'spec_result'; specId: string; success: boolean; reason?: string; spec?: Spec }
+  | { kind: 'specs_request'; status?: SpecStatus }
+  | { kind: 'specs_list'; specs: Spec[] }
+  | { kind: 'spec_get'; specId: string }
+  | { kind: 'spec_detail'; spec: Spec | null }
   | {
       kind: 'dashboard_sync';
       workspace: WorkspaceInfo;
@@ -62,6 +77,7 @@ export type HubMessage =
       tasks: TaskItem[];
       locks: FileLock[];
       findings: Finding[];
+      specs: Spec[];
       vars: Array<{ key: string; value: string; setBy: string }>;
       activity: Array<{ timestamp: number; actor: string; action: string; detail?: string }>;
       messages: Array<{ type: string; from: string; to?: string; content: string; timestamp: number }>;
@@ -128,6 +144,32 @@ export interface Finding {
   taskId?: string; // link to related task
   reportedBy: string;
   timestamp: number;
+}
+
+// Spec negotiation types
+export type SpecType = 'interface' | 'schema' | 'boundary' | 'contract';
+export type SpecStatus = 'proposed' | 'approved' | 'withdrawn';
+export type SpecVote = 'approve' | 'request_changes';
+
+export interface SpecReview {
+  reviewer: string;
+  vote: SpecVote;
+  comment?: string;
+  version: number;
+  timestamp: number;
+}
+
+export interface Spec {
+  id: string;
+  name: string;
+  specType: SpecType;
+  content: string;
+  status: SpecStatus;
+  proposedBy: string;
+  version: number;
+  reviews: SpecReview[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 // Workspace config stored locally after create/join

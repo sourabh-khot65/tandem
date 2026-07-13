@@ -315,4 +315,98 @@ export const TOOL_DEFINITIONS = [
     description: 'View all active file locks in the workspace. Shows who has what files locked and when locks expire.',
     inputSchema: { type: 'object' as const, properties: {} },
   },
+  {
+    name: 'intandem_propose_spec',
+    description:
+      'Propose a spec (interface, schema, boundary, or contract) for peer review. Use BEFORE implementing any shared interface or contract. All connected peers must approve before implementation begins.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string' as const, description: 'Short name for the spec (e.g., "AuthService.login signature")' },
+        spec_type: {
+          type: 'string' as const,
+          enum: ['interface', 'schema', 'boundary', 'contract'],
+          description:
+            'Type: interface (function signatures, APIs), schema (data structures), boundary (file/module ownership), contract (behavioral agreements)',
+        },
+        content: {
+          type: 'string' as const,
+          description:
+            'The spec content — function signatures, type definitions, ownership rules, or behavioral contracts',
+        },
+      },
+      required: ['name', 'spec_type', 'content'],
+    },
+  },
+  {
+    name: 'intandem_review_spec',
+    description:
+      'Review a proposed spec — vote approve or request_changes. You cannot review your own specs. All peers must approve for a spec to be accepted.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        spec_id: { type: 'string' as const, description: 'The spec ID to review' },
+        vote: {
+          type: 'string' as const,
+          enum: ['approve', 'request_changes'],
+          description: 'Your vote: approve or request_changes',
+        },
+        comment: {
+          type: 'string' as const,
+          description: 'Review comment (required for request_changes, optional for approve)',
+        },
+      },
+      required: ['spec_id', 'vote'],
+    },
+  },
+  {
+    name: 'intandem_update_spec',
+    description:
+      'Update a spec you proposed after receiving feedback. Increments the version and clears previous reviews, requiring fresh approval from all peers.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        spec_id: { type: 'string' as const, description: 'The spec ID to update' },
+        content: { type: 'string' as const, description: 'Updated spec content' },
+        name: { type: 'string' as const, description: 'Updated spec name (optional)' },
+      },
+      required: ['spec_id', 'content'],
+    },
+  },
+  {
+    name: 'intandem_specs',
+    description: 'List specs in the workspace. Filter by status (proposed, approved, withdrawn) or see all.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        status: {
+          type: 'string' as const,
+          enum: ['proposed', 'approved', 'withdrawn'],
+          description: 'Filter by status (omit to see all)',
+        },
+      },
+    },
+  },
+  {
+    name: 'intandem_get_spec',
+    description: 'Get a specific spec with all its reviews and current status.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        spec_id: { type: 'string' as const, description: 'The spec ID to fetch' },
+      },
+      required: ['spec_id'],
+    },
+  },
+  {
+    name: 'intandem_withdraw_spec',
+    description: 'Withdraw a spec you proposed. Only the author can withdraw. Cannot withdraw already-approved specs.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        spec_id: { type: 'string' as const, description: 'The spec ID to withdraw' },
+      },
+      required: ['spec_id'],
+    },
+  },
 ];

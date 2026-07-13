@@ -1055,3 +1055,581 @@ describe('dashboard', () => {
     });
   });
 });
+
+// ─── Spec Negotiation ────────────────────────────────────────────────
+
+describe('spec negotiation', () => {
+  function makeSpec(overrides: Record<string, unknown> = {}) {
+    return {
+      id: '',
+      name: 'AuthService.login',
+      specType: 'interface',
+      content: 'login(email: string, password: string): Promise<Token>',
+      status: 'proposed',
+      proposedBy: '',
+      version: 1,
+      reviews: [],
+      createdAt: 0,
+      updatedAt: 0,
+      ...overrides,
+    };
+  }
+
+  async function proposeAndGetId(
+    ws: WebSocket,
+    overrides: Record<string, unknown> = {},
+    peerToSync?: WebSocket,
+  ): Promise<string> {
+    const bcP = peerToSync ? waitFor(peerToSync, (m) => m.kind === 'spec_broadcast') : undefined;
+    sendMsg(ws, { kind: 'spec_propose', spec: makeSpec(overrides) } as HubMessage);
+    const result = await waitFor(ws, (m) => m.kind === 'spec_result' && m.success === true);
+    if (bcP) await bcP;
+    if (result.kind === 'spec_result' && result.spec) return result.spec.id;
+    throw new Error('Failed to propose spec');
+  }
+
+  describe('proposal', () => {
+    it('creates a spec and broadcasts to peers', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const broadcastP = waitFor(bob, (m) => m.kind === 'spec_broadcast');
+      sendMsg(alice, { kind: 'spec_propose', spec: makeSpec() } as HubMessage);
+
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result');
+      expect(result.kind).toBe('spec_result');
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(true);
+        expect(result.spec!.id).toMatch(/^S-[0-9a-f]{6}$/);
+        expect(result.spec!.proposedBy).toBe('Alice');
+      }
+
+      const bc = await broadcastP;
+      if (bc.kind === 'spec_broadcast') {
+        expect(bc.event).toBe('proposed');
+        expect(bc.spec.name).toBe('AuthService.login');
+        expect(bc.spec.proposedBy).toBe('Alice');
+        expect(bc.spec.version).toBe(1);
+        expect(bc.spec.status).toBe('proposed');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('generates server-side ID and enforces proposer identity', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const broadcastP = waitFor(bob, (m) => m.kind === 'spec_broadcast');
+      sendMsg(alice, {
+        kind: 'spec_propose',
+        spec: makeSpec({ id: 'client-id', proposedBy: 'Mallory' }),
+      } as HubMessage);
+      const bc = await broadcastP;
+
+      if (bc.kind === 'spec_broadcast') {
+        expect(bc.spec.id).not.toBe('client-id');
+        expect(bc.spec.id).toMatch(/^S-/);
+        expect(bc.spec.proposedBy).toBe('Alice');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('does not broadcast to proposer (sender excluded)', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'spec_propose', spec: makeSpec() } as HubMessage);
+      await waitFor(alice, (m) => m.kind === 'spec_result');
+
+      const aliceMsgs = await collect(alice, 100);
+      const selfBroadcast = aliceMsgs.find((m) => m.kind === 'spec_broadcast' && m.event === 'proposed');
+      expect(selfBroadcast).toBeUndefined();
+
+      alice.close();
+      bob.close();
+    });
+
+    it('rejects invalid spec type', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'spec_propose', spec: makeSpec({ specType: 'invalid' }) } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result');
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Invalid spec type');
+      }
+
+      alice.close();
+    });
+
+    it('rejects empty name', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'spec_propose', spec: makeSpec({ name: '' }) } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result');
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Spec name required');
+      }
+
+      alice.close();
+    });
+
+    it('rejects empty content', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'spec_propose', spec: makeSpec({ content: '' }) } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result');
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Spec content required');
+      }
+
+      alice.close();
+    });
+  });
+
+  describe('review', () => {
+    it('allows peer to review a spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve', comment: 'LGTM' } as HubMessage);
+      const result = await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      expect(result.kind).toBe('spec_result');
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(true);
+        expect(result.spec!.reviews.length).toBe(1);
+        expect(result.spec!.reviews[0].vote).toBe('approve');
+        expect(result.spec!.reviews[0].reviewer).toBe('Bob');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('allows request_changes vote with comment', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, {
+        kind: 'spec_review',
+        specId,
+        vote: 'request_changes',
+        comment: 'Need error handling',
+      } as HubMessage);
+      const result = await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(true);
+        expect(result.spec!.reviews[0].vote).toBe('request_changes');
+        expect(result.spec!.reviews[0].comment).toBe('Need error handling');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('blocks self-review', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(alice, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result' && m.specId === specId);
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Cannot review your own spec');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('blocks review on withdrawn spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(alice, { kind: 'spec_withdraw', specId } as HubMessage);
+      await waitFor(alice, (m) => m.kind === 'spec_result' && m.success === true);
+
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const result = await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('withdrawn');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('blocks review on approved spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      const approvedP = waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      await waitFor(bob, (m) => m.kind === 'spec_result');
+      await approvedP;
+
+      const { ws: carol } = await connectAndAuth(th.url, th.token, 'Carol');
+      await sleep(50);
+
+      sendMsg(carol, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const result = await waitFor(carol, (m) => m.kind === 'spec_result');
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('already approved');
+      }
+
+      alice.close();
+      bob.close();
+      carol.close();
+    });
+  });
+
+  describe('consensus', () => {
+    it('auto-approves when all non-proposer peers approve', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      const approvedP = waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const approved = await approvedP;
+
+      if (approved.kind === 'spec_broadcast') {
+        expect(approved.spec.status).toBe('approved');
+        expect(approved.event).toBe('approved');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('does not auto-approve with only proposer connected', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice);
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'specs_request' } as HubMessage);
+      const list = await waitFor(alice, (m) => m.kind === 'specs_list');
+
+      if (list.kind === 'specs_list') {
+        const spec = list.specs.find((s) => s.id === specId);
+        expect(spec!.status).toBe('proposed');
+      }
+
+      alice.close();
+    });
+
+    it('requires all peers to approve with 3 peers', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      const { ws: carol } = await connectAndAuth(th.url, th.token, 'Carol');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      await waitFor(bob, (m) => m.kind === 'spec_result');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'specs_request' } as HubMessage);
+      const list1 = await waitFor(alice, (m) => m.kind === 'specs_list');
+      if (list1.kind === 'specs_list') {
+        expect(list1.specs.find((s) => s.id === specId)!.status).toBe('proposed');
+      }
+
+      const approvedP = waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+      sendMsg(carol, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const approved = await approvedP;
+
+      if (approved.kind === 'spec_broadcast') {
+        expect(approved.spec.status).toBe('approved');
+      }
+
+      alice.close();
+      bob.close();
+      carol.close();
+    });
+
+    it('clears reviews after update and requires fresh approval', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, {
+        kind: 'spec_review',
+        specId,
+        vote: 'request_changes',
+        comment: 'Need error type',
+      } as HubMessage);
+      await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      sendMsg(alice, {
+        kind: 'spec_update',
+        specId,
+        content: 'login(): Promise<Token | AuthError>',
+      } as HubMessage);
+      const updateResult = await waitFor(alice, (m) => m.kind === 'spec_result' && m.specId === specId);
+
+      if (updateResult.kind === 'spec_result') {
+        expect(updateResult.spec!.version).toBe(2);
+        expect(updateResult.spec!.reviews.length).toBe(0);
+      }
+
+      const approvedP = waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      const approved = await approvedP;
+
+      if (approved.kind === 'spec_broadcast') {
+        expect(approved.spec.status).toBe('approved');
+        expect(approved.spec.version).toBe(2);
+      }
+
+      alice.close();
+      bob.close();
+    });
+  });
+
+  describe('update', () => {
+    it('only author can update', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_update', specId, content: 'hijacked' } as HubMessage);
+      const result = await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Only the author');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('cannot update approved spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      await waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+
+      sendMsg(alice, { kind: 'spec_update', specId, content: 'changed' } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result' && m.specId === specId);
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Can only update proposed');
+      }
+
+      alice.close();
+      bob.close();
+    });
+  });
+
+  describe('withdraw', () => {
+    it('only author can withdraw', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_withdraw', specId } as HubMessage);
+      const result = await waitFor(bob, (m) => m.kind === 'spec_result');
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Only the author');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('cannot withdraw approved spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(bob, { kind: 'spec_review', specId, vote: 'approve' } as HubMessage);
+      await waitFor(alice, (m) => m.kind === 'spec_broadcast' && m.event === 'approved');
+
+      sendMsg(alice, { kind: 'spec_withdraw', specId } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result' && m.specId === specId);
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(false);
+        expect(result.reason).toContain('Cannot withdraw an approved');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('author can withdraw proposed spec', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, {}, bob);
+
+      sendMsg(alice, { kind: 'spec_withdraw', specId } as HubMessage);
+      const result = await waitFor(alice, (m) => m.kind === 'spec_result' && m.specId === specId);
+
+      if (result.kind === 'spec_result') {
+        expect(result.success).toBe(true);
+        expect(result.spec!.status).toBe('withdrawn');
+      }
+
+      alice.close();
+      bob.close();
+    });
+  });
+
+  describe('query', () => {
+    it('lists all specs', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      await proposeAndGetId(alice, { name: 'Spec A' }, bob);
+      await proposeAndGetId(alice, { name: 'Spec B' }, bob);
+
+      sendMsg(alice, { kind: 'specs_request' } as HubMessage);
+      const list = await waitFor(alice, (m) => m.kind === 'specs_list');
+
+      if (list.kind === 'specs_list') {
+        expect(list.specs.length).toBe(2);
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('filters by status', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      const { ws: bob } = await connectAndAuth(th.url, th.token, 'Bob');
+      await sleep(50);
+
+      await proposeAndGetId(alice, { name: 'Keep' }, bob);
+      const withdrawId = await proposeAndGetId(alice, { name: 'Withdraw' }, bob);
+
+      sendMsg(alice, { kind: 'spec_withdraw', specId: withdrawId } as HubMessage);
+      await waitFor(alice, (m) => m.kind === 'spec_result' && m.success === true && m.specId === withdrawId);
+
+      sendMsg(alice, { kind: 'specs_request', status: 'proposed' } as HubMessage);
+      const list = await waitFor(alice, (m) => m.kind === 'specs_list');
+
+      if (list.kind === 'specs_list') {
+        expect(list.specs.length).toBe(1);
+        expect(list.specs[0].name).toBe('Keep');
+      }
+
+      alice.close();
+      bob.close();
+    });
+
+    it('gets a single spec via spec_get', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice, { name: 'DetailTest' });
+
+      sendMsg(alice, { kind: 'spec_get', specId } as HubMessage);
+      const detail = await waitFor(alice, (m) => m.kind === 'spec_detail');
+
+      if (detail.kind === 'spec_detail') {
+        expect(detail.spec).not.toBeNull();
+        expect(detail.spec!.id).toBe(specId);
+        expect(detail.spec!.name).toBe('DetailTest');
+      }
+
+      alice.close();
+    });
+
+    it('returns null for unknown spec_get', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      sendMsg(alice, { kind: 'spec_get', specId: 'S-nonexistent' } as HubMessage);
+      const detail = await waitFor(alice, (m) => m.kind === 'spec_detail');
+
+      if (detail.kind === 'spec_detail') {
+        expect(detail.spec).toBeNull();
+      }
+
+      alice.close();
+    });
+  });
+
+  describe('dashboard', () => {
+    it('includes specs in dashboard_sync', async () => {
+      const { ws: alice } = await connectAndAuth(th.url, th.token, 'Alice');
+      await sleep(50);
+
+      const specId = await proposeAndGetId(alice);
+      await sleep(50);
+
+      const dash = new WebSocket(th.url);
+      dash.on('open', () => {
+        sendMsg(dash, { kind: 'auth', token: th.token, username: '__dashboard__', sessionId: '__dashboard__' });
+      });
+      const sync = await waitFor(dash, (m) => m.kind === 'dashboard_sync');
+
+      if (sync.kind === 'dashboard_sync') {
+        expect(sync.specs.length).toBe(1);
+        expect(sync.specs[0].id).toBe(specId);
+      }
+
+      dash.close();
+      alice.close();
+    });
+  });
+});

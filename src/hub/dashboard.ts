@@ -207,6 +207,13 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
 .msg-t.handoff{color:var(--purple)}
 .msg-t.question{color:var(--blue)}
 
+.spec-st{font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:2px 6px;border-radius:2px}
+.spec-proposed{color:var(--amber);background:var(--amber-m)}
+.spec-approved{color:var(--green);background:var(--green-m)}
+.spec-withdrawn{color:var(--faint);opacity:.6}
+.spec-type{font-size:.65rem;color:var(--muted);text-transform:lowercase}
+.spec-content{font-family:var(--mono);font-size:.78rem;color:var(--muted);max-height:60px;overflow:hidden;white-space:pre-wrap;word-break:break-word;margin:0;padding:0}
+
 .tab-empty{flex:1;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.88rem;color:var(--ghost)}
 .tw{padding:12px 16px;flex:1;overflow-y:auto}
 
@@ -258,6 +265,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
   <div class="m-stat"><span>tasks</span> <span class="m-val" id="mTasks">0</span></div>
   <div class="m-stat"><span>locks</span> <span class="m-val" id="mLocks">0</span></div>
   <div class="m-stat"><span>findings</span> <span class="m-val" id="mFindings">0</span></div>
+  <div class="m-stat"><span>specs</span> <span class="m-val" id="mSpecs">0</span></div>
 </div>
 
 <div class="layout">
@@ -273,6 +281,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
         <div class="stat-row"><span class="stat-lbl">File locks</span><span class="stat-val" id="sL">0</span></div>
         <div class="stat-row"><span class="stat-lbl">Findings</span><span class="stat-val" id="sF">0</span></div>
         <div class="stat-row"><span class="stat-lbl">Shared vars</span><span class="stat-val" id="sV">0</span></div>
+        <div class="stat-row"><span class="stat-lbl">Specs</span><span class="stat-val" id="sSp">0</span></div>
         <div class="stat-row"><span class="stat-lbl">Messages</span><span class="stat-val" id="sM">0</span></div>
       </div>
     </div>
@@ -284,6 +293,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
       <button class="tab-btn" data-tab="tasks" role="tab" aria-selected="false">Tasks <span class="tab-ct" id="tcT">0</span></button>
       <button class="tab-btn" data-tab="locks" role="tab" aria-selected="false">Locks <span class="tab-ct" id="tcL">0</span></button>
       <button class="tab-btn" data-tab="findings" role="tab" aria-selected="false">Findings <span class="tab-ct" id="tcF">0</span></button>
+      <button class="tab-btn" data-tab="specs" role="tab" aria-selected="false">Specs <span class="tab-ct" id="tcSp">0</span></button>
       <button class="tab-btn" data-tab="vars" role="tab" aria-selected="false">Vars <span class="tab-ct" id="tcV">0</span></button>
       <button class="tab-btn" data-tab="messages" role="tab" aria-selected="false">Messages <span class="tab-ct" id="tcM">0</span></button>
     </div>
@@ -301,6 +311,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
     </div>
     <div class="tab-panel" id="panelLocks" role="tabpanel"><div class="tw" id="locksW"></div></div>
     <div class="tab-panel" id="panelFindings" role="tabpanel"><div class="tw" id="findingsW"></div></div>
+    <div class="tab-panel" id="panelSpecs" role="tabpanel"><div class="tw" id="specsW"></div></div>
     <div class="tab-panel" id="panelVars" role="tabpanel"><div class="tw" id="varsW"></div></div>
     <div class="tab-panel" id="panelMessages" role="tabpanel"><div class="tw" id="msgsW"></div></div>
   </div>
@@ -310,7 +321,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
 
 <script>
 (function(){
-  let state={workspace:null,peers:[],tasks:[],locks:[],findings:[],vars:[],activity:[],messages:[]};
+  let state={workspace:null,peers:[],tasks:[],locks:[],findings:[],specs:[],vars:[],activity:[],messages:[]};
   let ws=null,reconnectDelay=1000,reconnectTimer=null,lostTimer=null,startedAt=Date.now();
 
   const $=id=>document.getElementById(id);
@@ -406,17 +417,20 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
     $('sT').textContent=active;
     $('sL').textContent=state.locks.length;
     $('sF').textContent=state.findings.length;
+    $('sSp').textContent=state.specs.length;
     $('sV').textContent=state.vars.length;
     $('sM').textContent=state.messages.length;
     $('tcA').textContent=state.activity.length;
     $('tcT').textContent=state.tasks.length;
     $('tcL').textContent=state.locks.length;
     $('tcF').textContent=state.findings.length;
+    $('tcSp').textContent=state.specs.length;
     $('tcV').textContent=state.vars.length;
     $('tcM').textContent=state.messages.length;
     $('mTasks').textContent=active;
     $('mLocks').textContent=state.locks.length;
     $('mFindings').textContent=state.findings.length;
+    $('mSpecs').textContent=state.specs.length;
   }
 
   // Render: Activity
@@ -507,9 +521,20 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
     $('msgsW').innerHTML=h+'</tbody></table>';
   }
 
+  // Render: Specs
+  function renderSpecs(){
+    if(!state.specs.length){$('specsW').innerHTML='<div class="tab-empty">No specs proposed</div>';return}
+    let h='<table class="dt"><thead><tr><th>ID</th><th>Status</th><th>Type</th><th>Name</th><th>By</th><th>Ver</th><th>Reviews</th></tr></thead><tbody>';
+    for(const s of state.specs){
+      const reviews=s.reviews&&s.reviews.length?s.reviews.map(r=>esc(r.reviewer)+': '+r.vote).join(', '):'none';
+      h+='<tr><td>'+esc(s.id)+'</td><td><span class="spec-st spec-'+s.status+'">'+s.status+'</span></td><td><span class="spec-type">'+esc(s.specType)+'</span></td><td>'+esc(s.name)+'</td><td>'+esc(s.proposedBy)+'</td><td>v'+s.version+'</td><td>'+esc(reviews)+'</td></tr>';
+    }
+    $('specsW').innerHTML=h+'</tbody></table>';
+  }
+
   function renderAll(){
     renderPeers();renderStats();renderActivity();renderTasks();
-    renderLocks();renderFindings();renderVars();renderMessages();
+    renderLocks();renderFindings();renderSpecs();renderVars();renderMessages();
     if(state.workspace?.inviteCode){
       const el=$('joinCode');
       el.textContent=state.workspace.inviteCode;
@@ -554,7 +579,7 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
       case 'dashboard_sync':
         state.workspace=msg.workspace;state.peers=msg.peers;state.tasks=msg.tasks;
         state.locks=msg.locks;state.findings=msg.findings;state.vars=msg.vars;
-        state.activity=msg.activity;state.messages=msg.messages;
+        state.activity=msg.activity;state.messages=msg.messages;state.specs=msg.specs||[];
         $('wsName').textContent=msg.workspace.name;
         renderAll();sbar('synced with hub');
         break;
@@ -584,6 +609,12 @@ body{font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1
       case 'finding_broadcast':
         state.findings.push(msg.finding);renderFindings();renderStats();
         toast('finding: '+msg.finding.summary.slice(0,40));break;
+      case 'spec_broadcast':{
+        const si=state.specs.findIndex(s=>s.id===msg.spec.id);
+        if(si>=0)state.specs[si]=msg.spec;else state.specs.push(msg.spec);
+        renderSpecs();renderStats();
+        toast('spec '+msg.event+': '+msg.spec.name.slice(0,30));break;
+      }
       case 'var_set':{
         const vi=state.vars.findIndex(v=>v.key===msg.key);
         if(vi>=0)state.vars[vi]={key:msg.key,value:msg.value,setBy:msg.setBy};

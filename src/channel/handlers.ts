@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import WebSocket from 'ws';
-import { parseInvite, createShortInvite, encryptMessage, signMessage } from '../shared/crypto.js';
+import { parseInvite, createShortInvite, encryptMessage, signMessage, sanitizeContent } from '../shared/crypto.js';
 import {
   saveWorkspaceConfig,
   loadWorkspaceConfig,
@@ -11,7 +11,18 @@ import {
 } from '../shared/config.js';
 import { findRunningHub, spawnHub, stopHub } from '../shared/hub-lifecycle.js';
 import { resolveShortCode } from '../shared/invite.js';
-import type { PeerMessage, MessageType, TaskItem, CodeReference, Finding, FindingSeverity } from '../shared/types.js';
+import type {
+  PeerMessage,
+  MessageType,
+  TaskItem,
+  CodeReference,
+  Finding,
+  FindingSeverity,
+  Spec,
+  SpecStatus,
+  SpecVote,
+  SpecType,
+} from '../shared/types.js';
 import { HubConnection } from './connection.js';
 import { VALID_TYPES } from './tools.js';
 
@@ -44,6 +55,9 @@ export interface ChannelState {
   pendingActivityResolve: ((result: string) => void) | null;
   pendingFindingsResolve: ((result: string) => void) | null;
   pendingLockResolve: ((result: string) => void) | null;
+  pendingSpecsResolve: ((specs: Spec[]) => void) | null;
+  pendingSpecDetailResolve: ((spec: Spec | null) => void) | null;
+  pendingSpecResultResolve: ((result: string) => void) | null;
   stats: SessionStats;
 }
 
@@ -160,6 +174,18 @@ export async function handleToolCall(
       return handleUnlock(args, conn, state);
     case 'intandem_locks':
       return handleLocks(conn, state);
+    case 'intandem_propose_spec':
+      return handleProposeSpec(args, conn, state);
+    case 'intandem_review_spec':
+      return handleReviewSpec(args, conn, state);
+    case 'intandem_update_spec':
+      return handleUpdateSpec(args, conn, state);
+    case 'intandem_specs':
+      return handleSpecs(args, conn, state);
+    case 'intandem_get_spec':
+      return handleGetSpec(args, conn, state);
+    case 'intandem_withdraw_spec':
+      return handleWithdrawSpec(args, conn, state);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -710,6 +736,188 @@ async function handleLocks(conn: HubConnection, state: ChannelState): Promise<To
       if (state.pendingLockResolve) {
         state.pendingLockResolve = null;
         resolve(text('Timed out waiting for locks list.'));
+      }
+    }, 3000);
+  });
+}
+
+// ── Spec negotiation handlers ───────────────────────────────────────
+
+async function handleProposeSpec(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const name = args.name as string;
+  const specType = args.spec_type as SpecType;
+  const content = args.content as string;
+  if (!name || !specType || !content) return text('name, spec_type, and content are required.');
+
+  const spec: Spec = {
+    id: '',
+    name,
+    specType,
+    content,
+    status: 'proposed',
+    proposedBy: state.myUsername,
+    version: 1,
+    reviews: [],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  return new Promise((resolve) => {
+    state.pendingSpecResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'spec_propose', spec });
+    setTimeout(() => {
+      if (state.pendingSpecResultResolve) {
+        state.pendingSpecResultResolve = null;
+        resolve(text('Timed out waiting for proposal confirmation.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleReviewSpec(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const specId = args.spec_id as string;
+  const vote = args.vote as SpecVote;
+  const comment = args.comment as string | undefined;
+  if (!specId || !vote) return text('spec_id and vote are required.');
+  if (vote === 'request_changes' && !comment) return text('A comment is required when requesting changes.');
+
+  return new Promise((resolve) => {
+    state.pendingSpecResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'spec_review', specId, vote, comment });
+    setTimeout(() => {
+      if (state.pendingSpecResultResolve) {
+        state.pendingSpecResultResolve = null;
+        resolve(text('Timed out waiting for review response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleUpdateSpec(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const specId = args.spec_id as string;
+  const content = args.content as string;
+  const name = args.name as string | undefined;
+  if (!specId || !content) return text('spec_id and content are required.');
+
+  return new Promise((resolve) => {
+    state.pendingSpecResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'spec_update', specId, content, name });
+    setTimeout(() => {
+      if (state.pendingSpecResultResolve) {
+        state.pendingSpecResultResolve = null;
+        resolve(text('Timed out waiting for update response.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleSpecs(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const status = args.status as SpecStatus | undefined;
+
+  return new Promise((resolve) => {
+    state.pendingSpecsResolve = (specs: Spec[]) => {
+      if (specs.length === 0) {
+        resolve(text(status ? `No ${status} specs.` : 'No specs in this workspace.'));
+        return;
+      }
+      const lines = specs.map((s) => {
+        const reviewSummary =
+          s.reviews.length > 0 ? s.reviews.map((r) => `${r.reviewer}: ${r.vote}`).join(', ') : 'none';
+        return `[${sanitizeContent(s.id)}] ${s.status.toUpperCase()} — "${sanitizeContent(s.name)}" (${s.specType}) v${s.version} by ${s.proposedBy}\n    Reviews: ${reviewSummary}`;
+      });
+      resolve(text(`Specs (${specs.length}):\n${lines.join('\n')}`));
+    };
+    conn.send({ kind: 'specs_request', status });
+    setTimeout(() => {
+      if (state.pendingSpecsResolve) {
+        state.pendingSpecsResolve = null;
+        resolve(text('Timed out waiting for specs list.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleGetSpec(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const specId = args.spec_id as string;
+  if (!specId) return text('spec_id is required.');
+
+  return new Promise((resolve) => {
+    state.pendingSpecDetailResolve = (spec: Spec | null) => {
+      if (!spec) {
+        resolve(text(`Spec "${specId}" not found.`));
+        return;
+      }
+      const reviewLines =
+        spec.reviews.length > 0
+          ? spec.reviews
+              .map((r) => `  ${r.reviewer}: ${r.vote}${r.comment ? ' — ' + sanitizeContent(r.comment) : ''}`)
+              .join('\n')
+          : '  (none)';
+      const lines = [
+        `[${sanitizeContent(spec.id)}] ${spec.status.toUpperCase()} — "${sanitizeContent(spec.name)}"`,
+        `Type: ${spec.specType}`,
+        `Version: ${spec.version}`,
+        `Proposed by: ${spec.proposedBy}`,
+        ``,
+        `Content:`,
+        sanitizeContent(spec.content),
+        ``,
+        `Reviews:`,
+        reviewLines,
+      ];
+      resolve(text(lines.join('\n')));
+    };
+    conn.send({ kind: 'spec_get', specId });
+    setTimeout(() => {
+      if (state.pendingSpecDetailResolve) {
+        state.pendingSpecDetailResolve = null;
+        resolve(text('Timed out waiting for spec details.'));
+      }
+    }, 3000);
+  });
+}
+
+async function handleWithdrawSpec(
+  args: Record<string, unknown>,
+  conn: HubConnection,
+  state: ChannelState,
+): Promise<ToolResult> {
+  if (!conn.connected) return text('Not connected. Create or join a workspace first.');
+  const specId = args.spec_id as string;
+  if (!specId) return text('spec_id is required.');
+
+  return new Promise((resolve) => {
+    state.pendingSpecResultResolve = (result: string) => resolve(text(result));
+    conn.send({ kind: 'spec_withdraw', specId });
+    setTimeout(() => {
+      if (state.pendingSpecResultResolve) {
+        state.pendingSpecResultResolve = null;
+        resolve(text('Timed out waiting for withdraw response.'));
       }
     }, 3000);
   });

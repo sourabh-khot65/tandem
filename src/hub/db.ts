@@ -2,7 +2,17 @@ import Database from 'better-sqlite3';
 import { join } from 'node:path';
 import { mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import type { TaskItem, Finding, FindingSeverity, FileLock } from '../shared/types.js';
+import type {
+  TaskItem,
+  Finding,
+  FindingSeverity,
+  FileLock,
+  Spec,
+  SpecReview,
+  SpecStatus,
+  SpecVote,
+  SpecType,
+} from '../shared/types.js';
 
 const DATA_DIR = join(homedir(), '.tandem', 'data');
 
@@ -27,6 +37,51 @@ interface MessageRow {
   to_user: string | null;
   content: string;
   timestamp: number;
+}
+
+interface SpecRow {
+  id: string;
+  name: string;
+  spec_type: string;
+  content: string;
+  status: string;
+  proposed_by: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface SpecReviewRow {
+  id: number;
+  spec_id: string;
+  reviewer: string;
+  vote: string;
+  comment: string | null;
+  version: number;
+  timestamp: number;
+}
+
+function rowToSpec(row: SpecRow, reviews: SpecReviewRow[]): Spec {
+  return {
+    id: row.id,
+    name: row.name,
+    specType: row.spec_type as SpecType,
+    content: row.content,
+    status: row.status as SpecStatus,
+    proposedBy: row.proposed_by,
+    version: row.version,
+    reviews: reviews
+      .filter((r) => r.version === row.version)
+      .map((r) => ({
+        reviewer: r.reviewer,
+        vote: r.vote as SpecVote,
+        comment: r.comment ?? undefined,
+        version: r.version,
+        timestamp: r.timestamp,
+      })),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function rowToTask(row: TaskRow): TaskItem {
@@ -118,6 +173,29 @@ export class TandemDB {
         locked_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL,
         task_id TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS specs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        spec_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'proposed',
+        proposed_by TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS spec_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec_id TEXT NOT NULL,
+        reviewer TEXT NOT NULL,
+        vote TEXT NOT NULL,
+        comment TEXT,
+        version INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        UNIQUE(spec_id, reviewer, version)
       );
     `);
   }
@@ -483,6 +561,89 @@ export class TandemDB {
       expiresAt: r.expires_at,
       taskId: r.task_id ?? undefined,
     }));
+  }
+
+  // ── Specs ──────────────────────────────────────────────────────────
+
+  createSpec(spec: Spec): void {
+    this.db
+      .prepare(
+        `INSERT INTO specs (id, name, spec_type, content, status, proposed_by, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        spec.id,
+        spec.name,
+        spec.specType,
+        spec.content,
+        spec.status,
+        spec.proposedBy,
+        spec.version,
+        spec.createdAt,
+        spec.updatedAt,
+      );
+  }
+
+  getSpec(id: string): Spec | null {
+    const row = this.db.prepare('SELECT * FROM specs WHERE id = ?').get(id) as SpecRow | undefined;
+    if (!row) return null;
+    const reviews = this.db
+      .prepare('SELECT * FROM spec_reviews WHERE spec_id = ? ORDER BY timestamp')
+      .all(id) as SpecReviewRow[];
+    return rowToSpec(row, reviews);
+  }
+
+  getSpecs(filters?: { status?: SpecStatus }): Spec[] {
+    let sql = 'SELECT * FROM specs';
+    const values: unknown[] = [];
+    if (filters?.status) {
+      sql += ' WHERE status = ?';
+      values.push(filters.status);
+    }
+    sql += ' ORDER BY created_at DESC';
+    const rows = this.db.prepare(sql).all(...values) as SpecRow[];
+    return rows.map((row) => {
+      const reviews = this.db
+        .prepare('SELECT * FROM spec_reviews WHERE spec_id = ? ORDER BY timestamp')
+        .all(row.id) as SpecReviewRow[];
+      return rowToSpec(row, reviews);
+    });
+  }
+
+  updateSpec(id: string, updates: { name?: string; content?: string }): Spec | null {
+    const row = this.db.prepare('SELECT * FROM specs WHERE id = ?').get(id) as SpecRow | undefined;
+    if (!row) return null;
+    const newVersion = row.version + 1;
+    const sets: string[] = ['version = ?', 'updated_at = ?'];
+    const values: unknown[] = [newVersion, Date.now()];
+    if (updates.content !== undefined) {
+      sets.push('content = ?');
+      values.push(updates.content);
+    }
+    if (updates.name !== undefined) {
+      sets.push('name = ?');
+      values.push(updates.name);
+    }
+    values.push(id);
+    this.db.prepare(`UPDATE specs SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+    return this.getSpec(id);
+  }
+
+  addSpecReview(specId: string, review: { reviewer: string; vote: SpecVote; comment?: string; version: number }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO spec_reviews (spec_id, reviewer, vote, comment, version, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(specId, review.reviewer, review.vote, review.comment ?? null, review.version, Date.now());
+  }
+
+  updateSpecStatus(id: string, status: SpecStatus): void {
+    this.db.prepare('UPDATE specs SET status = ?, updated_at = ? WHERE id = ?').run(status, Date.now(), id);
+  }
+
+  specCount(): number {
+    return (this.db.prepare('SELECT COUNT(*) as count FROM specs').get() as { count: number }).count;
   }
 
   close(): void {
