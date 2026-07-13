@@ -8,38 +8,45 @@ InTandem connects up to 5 Claude Code sessions into a shared workspace with end-
 
 ```bash
 npm install -g intandem
-intandem init   # adds MCP config to your project
 ```
 
 Requires Node 22+.
 
-## Usage
+## Quick Start
 
-**Create a workspace** in one Claude Code session:
+**Start a workspace:**
 
-```
-> Create an intandem workspace called fix-auth-bug
-
-Workspace "fix-auth-bug" created!
-Share this code with teammates:
-
-  VPA6KW@random-words.trycloudflare.com
-
-Messages are end-to-end encrypted.
+```bash
+intandem start fix-auth-bug
 ```
 
-**Join from another session** — same machine or across the network:
+```
+  Workspace "fix-auth-bug" started.
+
+  Join code:  VPA6KW@random-words.trycloudflare.com
+  Dashboard:  http://127.0.0.1:57520/dashboard?token=...
+
+  Start Claude Code with InTandem enabled:
+    claude --dangerously-load-development-channels server:intandem
+
+  Share the join code with teammates. They run:
+    intandem join VPA6KW@random-words.trycloudflare.com
+```
+
+**Join from another machine:**
+
+```bash
+intandem join VPA6KW@random-words.trycloudflare.com
+```
 
 ```
-> Join intandem workspace: VPA6KW@random-words.trycloudflare.com
+  Joined workspace "fix-auth-bug" (1 peer online).
 
-Connected to "fix-auth-bug" as NeonNaruto!
-Peers online: CosmicYoda
-
-CosmicYoda capabilities:
-  MCP servers: postgres-db, redis-cache
-  Working directory: /projects/backend
+  Start Claude Code with InTandem enabled:
+    claude --dangerously-load-development-channels server:intandem
 ```
+
+Then launch Claude Code with the flag shown above. The MCP channel auto-connects to the running workspace — no extra setup needed.
 
 Peers exchange findings, divide tasks, share code, and coordinate — all through natural language. Claude handles the tool calls automatically.
 
@@ -182,14 +189,14 @@ If the tunnel drops, InTandem retries automatically and notifies connected peers
 Claude A ──► MCP tool call ──► Channel (encrypt) ──► WebSocket Hub ──► Channel (decrypt) ──► MCP notification ──► Claude B
 ```
 
-InTandem runs as a single process per Claude Code session. When creating a workspace, the process embeds the hub — no separate server to manage.
+The hub runs as a detached daemon process that survives MCP reconnects, managed via pidfile at `~/.tandem/hub.json`.
 
 ```
 src/
   channel/         MCP server, WebSocket client, tool handlers
-  hub/             WebSocket hub, SQLite persistence
-  shared/          Protocol types, cryptography, tunnel, configuration
-  cli.ts           CLI entrypoint (init, whoami, rename)
+  hub/             WebSocket hub, SQLite persistence, daemon process
+  shared/          Protocol types, cryptography, tunnel, configuration, invite resolution
+  cli.ts           CLI entrypoint (start, join, hub, whoami, rename)
 ```
 
 **Hub** — A WebSocket server that authenticates peers, routes encrypted messages, manages the task board, stores findings and workspace variables, and maintains an activity log in SQLite.
@@ -213,7 +220,12 @@ npm run lint         # typecheck + format
 ## CLI
 
 ```bash
-intandem init              # write .mcp.json in current directory
+intandem start [name]      # start a workspace (default: directory name)
+intandem join <code>       # join a teammate's workspace
+intandem hub status        # show running hub info
+intandem hub stop          # stop the hub
+intandem hub logs          # show recent hub logs
+intandem hub dashboard     # open dashboard in browser
 intandem whoami            # print your username
 intandem rename <name>     # change your username
 ```
