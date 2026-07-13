@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 import { startChannelServer } from './channel/server.js';
 import { generateUsername } from './shared/names.js';
-import { saveUsername, loadUsername, clearWorkspaceConfig, cleanStaleSessions } from './shared/config.js';
-import { findRunningHub, stopHub } from './shared/hub-lifecycle.js';
+import {
+  saveUsername,
+  loadUsername,
+  saveWorkspaceConfig,
+  clearWorkspaceConfig,
+  cleanStaleSessions,
+} from './shared/config.js';
+import { findRunningHub, spawnHub, stopHub } from './shared/hub-lifecycle.js';
+import { parseInvite, createShortInvite } from './shared/crypto.js';
+import { resolveShortCode, validateConnection } from './shared/invite.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const args = process.argv.slice(2);
@@ -19,19 +27,7 @@ function getOrCreateUsername(): string {
   return username;
 }
 
-function printBanner(): void {
-  console.log(`
-  ╔════════════════════════════════════╗
-  ║        I N   T A N D E M          ║
-  ║   Pair Programming for Claude Code ║
-  ╚════════════════════════════════════╝
-`);
-}
-
-function cmdInit(): void {
-  printBanner();
-  const username = getOrCreateUsername();
-
+function ensureMcpJson(): void {
   const mcpPath = join(process.cwd(), '.mcp.json');
   let mcpConfig: Record<string, unknown> = {};
 
@@ -47,23 +43,165 @@ function cmdInit(): void {
     mcpConfig.mcpServers = {};
   }
 
-  (mcpConfig.mcpServers as Record<string, unknown>).intandem = {
-    command: 'npx',
-    args: ['intandem', 'channel'],
-  };
+  const servers = mcpConfig.mcpServers as Record<string, unknown>;
+  if (!servers.intandem) {
+    servers.intandem = {
+      command: 'npx',
+      args: ['intandem', 'channel'],
+    };
+    writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n');
+    console.log('  .mcp.json configured');
+  }
+}
 
-  writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2) + '\n');
+function printClaude(): void {
+  console.log();
+  console.log('  Start Claude Code with InTandem enabled:');
+  console.log('    claude --dangerously-load-development-channels server:intandem');
+}
 
-  console.log(`  ✓ Your username: ${username}`);
-  console.log(`  ✓ .mcp.json configured`);
+async function cmdStart(): Promise<void> {
+  const username = getOrCreateUsername();
+  ensureMcpJson();
+
+  // Idempotent: if hub already running, just print info
+  const existing = findRunningHub();
+  if (existing) {
+    const shortInvite = createShortInvite(existing.inviteCode, existing.tunnelUrl);
+    const dashboardUrl =
+      existing.dashboardUrl ??
+      `http://127.0.0.1:${existing.port}/dashboard?token=${encodeURIComponent(existing.token)}`;
+
+    console.log();
+    console.log(`  Workspace "${existing.workspaceName}" already running.`);
+    console.log();
+    console.log(`  Join code:  ${shortInvite}`);
+    console.log(`  Dashboard:  ${dashboardUrl}`);
+    printClaude();
+    console.log();
+    return;
+  }
+
+  const name = args[1] ?? basename(process.cwd());
+  console.log(`  Starting workspace "${name}"...`);
+
+  const info = await spawnHub({ name });
+
+  saveWorkspaceConfig({
+    hubUrl: info.tunnelUrl ?? info.localUrl,
+    localUrl: info.localUrl,
+    workspaceId: info.workspaceId,
+    token: info.token,
+    username,
+    workspaceName: name,
+    isCreator: true,
+    maxPeers: info.maxPeers,
+  });
+
+  const shortInvite = createShortInvite(info.inviteCode, info.tunnelUrl);
+  const dashboardUrl =
+    info.dashboardUrl ?? `http://127.0.0.1:${info.port}/dashboard?token=${encodeURIComponent(info.token)}`;
+
   console.log();
-  console.log(`  Now start Claude Code:`);
-  console.log(`  claude --dangerously-load-development-channels server:intandem`);
+  console.log(`  Workspace "${name}" started.`);
   console.log();
-  console.log(`  Then inside Claude, say:`);
-  console.log(`  "Create an intandem workspace called fix-auth-bug"`);
-  console.log(`  or`);
-  console.log(`  "Join this intandem workspace: <paste join code>"`);
+  console.log(`  Join code:  ${shortInvite}`);
+  console.log(`  Dashboard:  ${dashboardUrl}`);
+  printClaude();
+  console.log();
+  console.log('  Share the join code with teammates. They run:');
+  console.log(`    intandem join ${shortInvite}`);
+  console.log();
+}
+
+async function cmdJoin(): Promise<void> {
+  const code = args[1];
+  if (!code) {
+    console.error('  Usage: intandem join <code>');
+    process.exit(1);
+  }
+
+  const username = getOrCreateUsername();
+  ensureMcpJson();
+
+  const invite = parseInvite(code);
+  if (!invite) {
+    console.error('  Invalid invite code. Ask your teammate for a new one.');
+    process.exit(1);
+  }
+
+  let hubUrl: string;
+  let workspaceId: string;
+  let token: string;
+
+  if (invite.type === 'full') {
+    hubUrl = invite.hubUrl;
+    workspaceId = invite.workspaceId;
+    token = invite.token;
+  } else {
+    // Short code — resolve via hub
+    const urlsToTry: string[] = [];
+    if (invite.host) {
+      urlsToTry.push(`wss://${invite.host}`, `ws://${invite.host}`);
+    }
+    const daemon = findRunningHub();
+    if (daemon?.localUrl) {
+      urlsToTry.push(daemon.localUrl);
+    }
+
+    if (urlsToTry.length === 0) {
+      console.error('  Short code needs a hub to resolve against.');
+      console.error('  Use the full join code, or ensure the hub is running locally.');
+      process.exit(1);
+    }
+
+    let resolved: { workspaceId: string; token: string } | null = null;
+    for (const url of urlsToTry) {
+      resolved = await resolveShortCode(url, invite.code);
+      if (resolved) {
+        hubUrl = url;
+        break;
+      }
+    }
+
+    if (!resolved) {
+      console.error('  Could not resolve invite code. The hub may be offline.');
+      console.error('  Ask your teammate for a new code or try again later.');
+      process.exit(1);
+    }
+
+    hubUrl = hubUrl!;
+    workspaceId = resolved.workspaceId;
+    token = resolved.token;
+  }
+
+  // Validate by connecting — exchanges one-time ticket for real token
+  const result = await validateConnection(hubUrl, token, username);
+  if (result) {
+    token = result.token;
+  }
+
+  saveWorkspaceConfig({
+    hubUrl,
+    localUrl: hubUrl.startsWith('ws://127.0.0.1') ? hubUrl : undefined,
+    workspaceId,
+    token,
+    username,
+    workspaceName: result?.workspaceName ?? 'unknown',
+  });
+
+  if (result) {
+    const peerCount = result.peers.length;
+    const peerStr = peerCount === 1 ? '1 peer online' : `${peerCount} peers online`;
+    console.log();
+    console.log(`  Joined workspace "${result.workspaceName}" (${peerStr}).`);
+  } else {
+    console.log();
+    console.log('  Saved join config (hub unreachable — will retry on connect).');
+  }
+
+  printClaude();
+  console.log();
 }
 
 function cmdWhoami(): void {
@@ -77,7 +215,7 @@ function cmdRename(): void {
     process.exit(1);
   }
   saveUsername(newName);
-  console.log(`  ✓ Username changed to: ${newName}`);
+  console.log(`  Username changed to: ${newName}`);
 }
 
 async function cmdChannel(): Promise<void> {
@@ -120,7 +258,7 @@ function cmdHub(): void {
     case 'stop': {
       const stopped = stopHub();
       if (stopped) {
-        console.log('  ✓ Hub daemon stopped.');
+        console.log('  Hub daemon stopped.');
       } else {
         console.log('  No hub daemon running.');
       }
@@ -142,7 +280,7 @@ function cmdHub(): void {
     case 'dashboard': {
       const info = findRunningHub();
       if (!info) {
-        console.log('  No hub daemon running. Start one with: intandem init');
+        console.log('  No hub daemon running. Start one with: intandem start');
         return;
       }
       const url =
@@ -153,74 +291,78 @@ function cmdHub(): void {
       break;
     }
     default:
-      console.log(`  Usage:`);
-      console.log(`    intandem hub status          Show running hub daemon info`);
-      console.log(`    intandem hub stop            Stop the hub daemon`);
-      console.log(`    intandem hub logs            Show recent hub daemon logs`);
-      console.log(`    intandem hub dashboard       Open the workspace dashboard in a browser`);
+      console.log('  Usage:');
+      console.log('    intandem hub status          Show running hub daemon info');
+      console.log('    intandem hub stop            Stop the hub daemon');
+      console.log('    intandem hub logs            Show recent hub daemon logs');
+      console.log('    intandem hub dashboard       Open the workspace dashboard in a browser');
       break;
   }
 }
 
 function printHelp(): void {
-  printBanner();
-  console.log(`  Setup:`);
+  console.log(`
+  I N   T A N D E M
+  Pair programming for Claude Code
+`);
+  console.log('  Commands:');
   console.log();
-  console.log(`    intandem init                Add InTandem to .mcp.json in current directory`);
-  console.log(`    intandem whoami              Show your username`);
-  console.log(`    intandem rename <name>       Change your username`);
+  console.log('    intandem start [name]           Start a workspace (default: directory name)');
+  console.log("    intandem join <code>            Join a teammate's workspace");
+  console.log('    intandem hub status             Show running hub info');
+  console.log('    intandem hub stop               Stop the hub');
+  console.log('    intandem hub logs               Show recent hub logs');
+  console.log('    intandem hub dashboard          Open dashboard in browser');
   console.log();
-  console.log(`  Hub:`);
+  console.log('  Other:');
   console.log();
-  console.log(`    intandem hub status          Show running hub daemon info`);
-  console.log(`    intandem hub stop            Stop the hub daemon`);
-  console.log(`    intandem hub logs            Show recent hub daemon logs`);
-  console.log(`    intandem hub dashboard       Open the workspace dashboard in a browser`);
-  console.log();
-  console.log(`  Usage:`);
-  console.log();
-  console.log(`    1. Run "intandem init" in your project directory`);
-  console.log(`    2. Start Claude Code with: claude --dangerously-load-development-channels server:intandem`);
-  console.log(`    3. Tell Claude: "Create an intandem workspace" or "Join intandem workspace: <code>"`);
-  console.log(`    4. Everything else happens inside Claude — sharing, tasks, coordination`);
-  console.log();
-  console.log(`  Internal:`);
-  console.log();
-  console.log(`    intandem channel             (used by Claude Code — don't run manually)`);
+  console.log('    intandem whoami                 Show your username');
+  console.log('    intandem rename <name>          Change your username');
   console.log();
 }
 
-switch (command) {
-  case 'init':
-    cmdInit();
-    break;
-  case 'whoami':
-    cmdWhoami();
-    break;
-  case 'rename':
-    cmdRename();
-    break;
-  case 'channel':
-    cmdChannel();
-    break;
-  case 'hub-daemon':
-    cmdHubDaemon();
-    break;
-  case 'hub':
-    cmdHub();
-    break;
-  case 'cleanup':
-    clearWorkspaceConfig();
-    cleanStaleSessions();
-    break;
-  case 'help':
-  case '--help':
-  case '-h':
-  case undefined:
-    printHelp();
-    break;
-  default:
-    console.error(`Unknown command: ${command}`);
-    printHelp();
-    process.exit(1);
+async function main(): Promise<void> {
+  switch (command) {
+    case 'start':
+      await cmdStart();
+      break;
+    case 'join':
+      await cmdJoin();
+      break;
+    case 'whoami':
+      cmdWhoami();
+      break;
+    case 'rename':
+      cmdRename();
+      break;
+    case 'channel':
+      await cmdChannel();
+      break;
+    case 'hub-daemon':
+      await cmdHubDaemon();
+      break;
+    case 'hub':
+      cmdHub();
+      break;
+    case 'cleanup':
+      clearWorkspaceConfig();
+      cleanStaleSessions();
+      break;
+    case 'help':
+    case '--help':
+    case '-h':
+    case undefined:
+      printHelp();
+      break;
+    default:
+      console.error(`Unknown command: ${command}`);
+      printHelp();
+      process.exit(1);
+  }
 }
+
+main().catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`  Error: ${message}`);
+  process.exit(1);
+});

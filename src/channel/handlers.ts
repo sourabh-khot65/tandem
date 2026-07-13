@@ -10,6 +10,7 @@ import {
   findLocalHubConfig,
 } from '../shared/config.js';
 import { findRunningHub, spawnHub, stopHub } from '../shared/hub-lifecycle.js';
+import { resolveShortCode } from '../shared/invite.js';
 import type { PeerMessage, MessageType, TaskItem, CodeReference, Finding, FindingSeverity } from '../shared/types.js';
 import { HubConnection } from './connection.js';
 import { VALID_TYPES } from './tools.js';
@@ -220,51 +221,6 @@ async function handleCreate(
   ];
 
   return text(lines.join('\n'));
-}
-
-/**
- * Resolve a short invite code by connecting to the hub and asking it.
- * Returns the decoded join info, or null if resolution fails.
- */
-function resolveShortCode(hubUrl: string, inviteCode: string): Promise<{ workspaceId: string; token: string } | null> {
-  return new Promise((resolve) => {
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(hubUrl);
-    } catch {
-      resolve(null);
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      ws.close();
-      resolve(null);
-    }, 5000);
-
-    ws.on('open', () => {
-      ws.send(JSON.stringify({ kind: 'invite_resolve', inviteCode }));
-    });
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        clearTimeout(timeout);
-        if (msg.kind === 'invite_result' && msg.token) {
-          ws.close();
-          resolve({ workspaceId: msg.workspaceId, token: msg.token });
-        } else {
-          ws.close();
-          resolve(null);
-        }
-      } catch {
-        ws.close();
-        resolve(null);
-      }
-    });
-    ws.on('error', () => {
-      clearTimeout(timeout);
-      resolve(null);
-    });
-  });
 }
 
 async function handleJoin(
