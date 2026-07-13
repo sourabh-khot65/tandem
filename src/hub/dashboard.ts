@@ -503,6 +503,56 @@ button,input{font-family:inherit}
     setTimeout(()=>{t.classList.add('out');setTimeout(()=>t.remove(),160)},2800);
   }
 
+  // E2E decryption: peer messages are AES-256-GCM encrypted with a key
+  // HKDF-derived from the workspace token. This page authenticates with that
+  // same token (URL param), so it can decrypt client-side — the hub itself
+  // never sees plaintext. Mirrors encryptMessage() in src/shared/crypto.ts.
+  const wsToken=new URLSearchParams(location.search).get('token');
+  let encKeyP=null;
+  function encKey(){
+    if(!encKeyP){
+      const te=new TextEncoder();
+      encKeyP=crypto.subtle.importKey('raw',te.encode(wsToken),'HKDF',false,['deriveKey'])
+        .then(km=>crypto.subtle.deriveKey(
+          {name:'HKDF',hash:'SHA-256',salt:te.encode('intandem-e2e-v2'),info:te.encode('intandem-enc')},
+          km,{name:'AES-GCM',length:256},false,['decrypt']));
+    }
+    return encKeyP;
+  }
+  function b64u(s){
+    s=s.replace(/-/g,'+').replace(/_/g,'/');
+    while(s.length%4)s+='=';
+    const bin=atob(s),a=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);
+    return a;
+  }
+  const CIPHER_RE=/^[A-Za-z0-9_-]{14,}\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{14,}$/;
+  async function decryptContent(c){
+    try{
+      if(!wsToken||!crypto.subtle)return null;
+      const p=c.split('.');
+      if(p.length!==3)return null;
+      const iv=b64u(p[0]),ct=b64u(p[1]),tag=b64u(p[2]);
+      const data=new Uint8Array(ct.length+tag.length);
+      data.set(ct);data.set(tag,ct.length);
+      const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv},await encKey(),data);
+      return new TextDecoder().decode(plain);
+    }catch{return null}
+  }
+  async function decryptPending(){
+    let changed=false;
+    for(const m of state.messages){
+      if(m._dec)continue;
+      m._dec=true;
+      if(typeof m.content==='string'&&CIPHER_RE.test(m.content)){
+        const plain=await decryptContent(m.content);
+        m.content=plain!==null?plain:'[encrypted \\u2014 cannot decrypt]';
+        changed=true;
+      }
+    }
+    if(changed)renderMessages();
+  }
+
   function fmtTime(ts){return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
   function dur(ms){
     const s=Math.floor(ms/1000);
@@ -909,6 +959,7 @@ button,input{font-family:inherit}
         state.claims=msg.claims||[];
         $('wsName').textContent=msg.workspace.name;
         renderAll();sbar('synced with hub');
+        decryptPending();
         break;
       case 'peer_joined':{
         if(!state.peers.find(p=>p.username===msg.username))
@@ -964,6 +1015,7 @@ button,input{font-family:inherit}
           state.messages.push(msg.payload);
           if(state.messages.length>100)state.messages=state.messages.slice(-50);
           renderMessages();renderStats();
+          decryptPending();
         }
         break;
     }
